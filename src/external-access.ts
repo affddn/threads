@@ -52,32 +52,96 @@ export function asksExternal(rules: Permission.Ruleset) {
   return rules.some((rule) => rule.effect === "ask" && governsExternal(rule));
 }
 
-// Allows are dropped and other inherited rules become denies, except that an external_directory ask
-// stays an ask so the user can approve on-demand access in the worker's own tab. An external_directory
-// allow in `shared` keeps its place in the inherited order.
-function inheritedRestrictions(inherited: Permission.Ruleset, shared: ReadonlySet<string> = new Set()): Permission.Rule[] {
-  return inherited.flatMap((rule): Permission.Rule[] => {
-    if (rule.effect === "allow") return rule.action === EXTERNAL_DIRECTORY && shared.has(rule.resource) ? [rule] : [];
-    const denied: Permission.Rule = { ...rule, effect: "deny" };
-    if (rule.effect !== "ask" || !governsExternal(rule)) return [denied];
-    const asked = external(rule.resource, "ask");
-    return rule.action === EXTERNAL_DIRECTORY ? [asked] : [denied, asked];
-  });
+// Intersections of nested glob languages can use the narrower glob unchanged. Non-nested,
+// overlapping languages cannot generally be expressed by one native permission rule.
+function intersect(left: string, right: string): { pattern: string; exact: boolean } | undefined {
+  const exact = (pattern: string) => ({ pattern, exact: true });
+  const conservative = () => ({ pattern: left, exact: false });
+  if (left === right || wildcard(right)) return exact(left);
+  if (wildcard(left)) return exact(right);
+  const normalize = (value: string) => value.replaceAll("\\", "/");
+  const a = normalize(left), b = normalize(right);
+  if (a === b) return exact(left);
+  // JavaScript's native /i case folding is not equivalent to lowercasing Unicode strings.
+  if (process.platform === "win32") return conservative();
+  // Native shell patterns ending in ` *` also match the bare command. Do not infer inclusion
+  // with the ordinary glob automaton for that special native syntax.
+  if (a.endsWith(" *") || b.endsWith(" *")) return conservative();
+  const literals = new Set([...a.split(""), ...b.split("")].filter((unit) => unit !== "*" && unit !== "?"));
+  let other = "\0";
+  while (literals.has(other)) other = String.fromCharCode(other.charCodeAt(0) + 1);
+  const alphabet = [...literals, other];
+  const closure = (pattern: string, positions: number[]) => {
+    const result = new Set(positions);
+    for (const position of result) if (pattern[position] === "*") result.add(position + 1);
+    return [...result].sort((x, y) => x - y);
+  };
+  const advance = (pattern: string, positions: number[], unit: string) => closure(pattern, positions.flatMap((position) => {
+    const token = pattern[position];
+    return token === "*" ? [position] : token === "?" || token === unit ? [position + 1] : [];
+  }));
+  const queue: [number[], number[]][] = [[closure(a, [0]), closure(b, [0])]];
+  const visited = new Set<string>();
+  let aOnly = false, bOnly = false, overlap = false;
+  for (let index = 0; index < queue.length; index++) {
+    const [x, y] = queue[index]!;
+    const key = `${x.join(",")};${y.join(",")}`;
+    if (visited.has(key)) continue;
+    visited.add(key);
+    if (visited.size > 10000) throw new Error(`Permission pattern composition exceeds state limit: ${left} & ${right}`);
+    const acceptsA = x.includes(a.length), acceptsB = y.includes(b.length);
+    aOnly ||= acceptsA && !acceptsB;
+    bOnly ||= acceptsB && !acceptsA;
+    overlap ||= acceptsA && acceptsB;
+    for (const unit of alphabet) queue.push([advance(a, x, unit), advance(b, y, unit)]);
+  }
+  if (!overlap) return undefined;
+  if (!aOnly) return exact(left);
+  if (!bOnly) return exact(right);
+  return conservative();
 }
 
-// Session rules follow the role's rules, so a preserved ask would override the role's own
-// external_directory rules. Directories that the coordinator and the role both allow by the same rule,
-// such as OpenCode's tool-output and configuration directories, stay allowed; the role's denies,
-// including a catch-all deny, are reasserted after the ask.
-export function workerRestrictions(inherited: Permission.Ruleset, role: Permission.Ruleset): Permission.Rule[] {
-  if (!asksExternal(inherited)) return inheritedRestrictions(inherited);
-  const shared = new Set(role
-    .filter((rule) => rule.effect === "allow" && rule.action === EXTERNAL_DIRECTORY && !wildcard(rule.resource))
-    .map((rule) => rule.resource));
-  return [
-    ...inheritedRestrictions(inherited, shared),
-    ...role.filter((rule) => rule.effect === "deny" && governsExternal(rule)).map((rule) => external(rule.resource, "deny")),
-  ];
+const stricter = (a: Permission.Effect, b: Permission.Effect): Permission.Effect =>
+  a === "deny" || b === "deny" ? "deny" : a === "ask" || b === "ask" ? "ask" : "allow";
+
+const unshadowed = (rules: Permission.Ruleset) => rules.filter((rule, index) => !rules.slice(index + 1).some((later) =>
+  (later.action === rule.action || wildcard(later.action)) && (later.resource === rule.resource || wildcard(later.resource))));
+
+// Lexicographic rule pairs preserve both last-match orders for representable intersections.
+// Non-nested pairs emit a caller-region deny: they may overdeny but never authorize outside
+// either policy. No unrestricted caller allow is copied through. Read projections retain the
+// existing external-ask exemption; write callers must still ask without a shared allow or grant.
+export function workerRestrictions(inherited: Permission.Ruleset, role: Permission.Ruleset, externalAsk: "ask" | "allow" = "ask"): Permission.Rule[] {
+  // Some grant-free write callers deliberately do not load the destination role. With no role
+  // available, retain restrictions only; exceptions cannot be restored safely.
+  if (role.length === 0) return inherited.flatMap((rule): Permission.Rule[] => {
+    if (rule.effect === "allow") return [];
+    if (rule.effect === "ask" && governsExternal(rule)) return rule.action === EXTERNAL_DIRECTORY
+      ? [external(rule.resource, "ask")]
+      : [{ ...rule, effect: "deny" }, external(rule.resource, "ask")];
+    return [{ ...rule, effect: "deny" }];
+  });
+  const caller = unshadowed([{ action: "*", resource: "*", effect: "allow" }, ...inherited]);
+  const profile = unshadowed([{ action: "*", resource: "*", effect: "ask" }, ...role]);
+  const result: Permission.Rule[] = [];
+  for (const parent of caller) for (const worker of profile) {
+    const action = intersect(parent.action, worker.action);
+    if (action === undefined) continue;
+    const resource = intersect(parent.resource, worker.resource);
+    if (resource === undefined) continue;
+    const precise = action.exact && resource.exact;
+    const effect = precise ? stricter(parent.effect === "ask" ? "deny" : parent.effect, worker.effect) : "deny";
+    result.push({ action: action.pattern, resource: resource.pattern, effect });
+    if (permissionMatches(action.pattern, EXTERNAL_DIRECTORY)) {
+      let callerEffect = parent.effect === "ask" ? externalAsk : parent.effect;
+      // Keep the existing conservative shared-directory contract beside a caller ask.
+      if (parent.effect === "allow" && asksExternal(inherited) && !wildcard(parent.resource) &&
+        !role.some((rule) => rule.action === EXTERNAL_DIRECTORY && rule.resource === parent.resource && rule.effect === "allow")) callerEffect = "ask";
+      const externalEffect = precise ? stricter(callerEffect, worker.effect) : "deny";
+      if (action.pattern !== EXTERNAL_DIRECTORY || effect !== externalEffect) result.push(external(resource.pattern, externalEffect));
+    }
+  }
+  return result;
 }
 
 // A catch-all `* *` deny is a baseline that grants override. Any other external_directory deny from

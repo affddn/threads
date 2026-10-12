@@ -38,6 +38,12 @@ Changing `title`, `directory`, `task`, `agent`, or the resolved `paths` under an
 
 `key` is scoped to the worker and determines the message ID. Sending the same key again with the same text is a safe retry. Sending it with different text is an error.
 
+The result confirms admission, not completion. A separate durable notice identifies the follow-up message and its native outcome: `succeeded`, `failed`, or `interrupted`. The notice does not replace the original report or establish a task verdict.
+
+Pending deliveries reconcile when the coordinator lists workers or enters a model turn. Retries reuse the recorded message IDs. If compaction removes the worker's follow-up message before completion is recorded, that completion remains unresolved because the SDK exposes only compacted context.
+
+Background recovery isolates rejected records and continues through the current page. Failed records remain pending for a later pass. The coordinator's context includes bounded diagnostics with the worker and message IDs. Explicit `threads_send` calls still return their own admission or wake errors.
+
 ## `threads_report` fields
 
 | Field | Meaning |
@@ -93,7 +99,7 @@ The terminal plugin reads worker state through the `threads` RPC, defined as `Th
 
 | Method | Effect |
 | --- | --- |
-| `snapshot` | Returns the workers of the given coordinators. Read-only. |
+| `snapshot` | Returns the workers of the given coordinators without delivering pending follow-ups. Removes stale index entries for deleted workers. |
 | `restore` | Clears the hidden state of the given coordinators' workers, then returns them. |
 
 Both methods take `{ coordinatorIDs: string[] }`, with at most 100 IDs, and return `{ workers: WorkerView[] }`. Raw HTTP requests wrap the input: `{ "input": { "coordinatorIDs": ["ses_..."] } }`.

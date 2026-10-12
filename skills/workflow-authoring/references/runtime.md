@@ -1,6 +1,6 @@
 # Workflow runtime contract
 
-Scripts run in OpenCode's confined Code Mode interpreter inside a terminable Bun worker. The parent service enforces the deadline, including during synchronous script work. Scripts cannot import modules or use host filesystem, process, network, clock, or randomness APIs. Agents inspect the outside world and return recorded data. Use arguments for timestamps and other variable inputs.
+Scripts run in OpenCode's confined Code Mode interpreter inside a terminable Bun worker. When a deadline is supplied, the parent service enforces it, including during synchronous script work. Scripts cannot import modules or use host filesystem, process, network, clock, or randomness APIs. Agents inspect the outside world and return recorded data. Use arguments for timestamps and other variable inputs.
 
 Keep each result below 1 MiB and the combined run journal below 16 MiB. Payload admission reserves space for control metadata and bounded failure diagnostics, so usable payload capacity is lower. Return concise structured findings and artifact paths instead of complete file contents. Run lists and completion notifications omit the full result; inspect a run to read it.
 
@@ -25,7 +25,7 @@ The body supports top-level `await`, ordinary data transformations, branching, a
 | `isolation` | `shared` by default, or `worktree` for a retained isolated checkout. Creating a worktree requires `access: "write"`; later readers can use its returned `directory`. |
 | `directory` | Optional existing directory beneath the owner session's directory, in one of its registered worktrees, or inside a granted path. Symlinks are resolved before containment checks. For another repository beneath that directory, worktree isolation uses the source repository's project and configured worktree strategy. A directory that only a grant admits has [extra conditions](#external-directories). |
 | `paths` | Optional list of up to 16 existing absolute directories outside the worker's directory that it may use without asking. Each path and its subdirectories are granted for `external_directory` only. |
-| `timeoutMs` | Optional step timeout, bounded by the run's execution policy. |
+| `timeoutMs` | Optional user-requested step timeout, bounded by any supplied run deadline. |
 
 Workers submit `workflows_result({ verdict, summary, evidence, result })`. Invalid results return a validation error so the worker can repair its output. A native execution that ends without a result has no task verdict.
 
@@ -50,10 +50,10 @@ The runner resolves symlinks, removes duplicates, sorts the list, and records it
 - `await phase(title)` records a display phase.
 - `await log(message)` records a bounded progress message.
 - `workflow(name, args)` invokes a saved workflow within the parent's limits.
-- `retry(thunk, { attempts })` bounds logical or validation retries, with three attempts by default. Give each agent attempt a distinct step key. Return expected negative findings as validated data, then let the validator decide whether another attempt is useful. A native execution failure or an explicit `FAIL`/`INCONCLUSIVE` report remains an unresolved failure and prevents the run from passing, even when caught by the script. Inspect uncertain writes before starting a replacement run.
-- `gate(thunk, validator, { attempts })` repeats until the validator accepts or attempts run out, with three attempts by default. The validator returns a boolean or `{ ok: boolean, feedback?: string }`. A truthy object without `ok: true` does not pass.
-- `loopUntilDry({ round, key, consecutiveEmpty, maxRounds })` accumulates unique findings until discovery stops producing new items. `round` and `key` are required; `key` is a property name or identity function. Defaults are two consecutive empty rounds and ten maximum rounds. Reaching the maximum returns the accumulated findings.
-- `checkpoint(prompt, { key })` records a question and waits for an explicit response through the run controls. The response becomes recorded input on resume. Responses are limited to 1 MiB and must fit in the aggregate journal. Rejected responses leave the checkpoint unanswered so a smaller response can be submitted.
+- `retry(thunk, { attempts }?)` retries logical or validation errors until success, cancellation, or a supplied attempt limit. New runs have no default attempt limit. Give each agent attempt a distinct step key. Return expected negative findings as validated data, then let the validator decide whether another attempt is useful. A native execution failure or an explicit `FAIL`/`INCONCLUSIVE` report remains an unresolved failure and prevents the run from passing, even when caught by the script. Inspect uncertain writes before starting a replacement run.
+- `gate(thunk, validator, { attempts }?)` repeats until the validator accepts, cancellation occurs, or a supplied attempt limit is reached. New runs have no default attempt limit. The validator returns a boolean or `{ ok: boolean, feedback?: string }`. A truthy object without `ok: true` does not pass.
+- `loopUntilDry({ round, key, consecutiveEmpty, maxRounds })` accumulates unique findings until discovery stops producing new items. `round` and `key` are required; `key` is a property name or identity function. The default termination condition is two consecutive empty rounds. New runs have no default maximum round count. Reaching a supplied maximum returns the accumulated findings.
+- `checkpoint(prompt, { key, reviewer? })` records a question and waits for an explicit response through the run controls. `reviewer` is `"human"` by default; `"coordinator"` allows heartbeat reminders for an authorized coordinator review. Neither value supplies a response or changes the control permissions. The response becomes recorded input on resume. Responses are limited to 1 MiB and must fit in the aggregate journal. Rejected responses leave the checkpoint unanswered so a smaller response can be submitted.
 
 Errors remain errors unless the script explicitly handles them. Do not discard failed items or substitute a passing result for missing evidence.
 
@@ -64,26 +64,36 @@ Errors remain errors unless the script explicitly handles them. Do not discard f
 | Limit | Default | Range |
 | --- | --- | --- |
 | `concurrency` | 3 | 1–8 |
-| `maxAgents` | 4 | 1–1000 |
-| `agentTimeoutMs` | 30 minutes | 1 second–7 days |
-| `timeoutMs` | 24 hours | 1 second–7 days |
+| `maxAgents` | Unset | 1–1000 when supplied |
+| `agentTimeoutMs` | Unset | 1 second–7 days when supplied |
+| `timeoutMs` | Unset | 1 second–7 days when supplied |
 | `tokenBudget` | Unset | Positive integer |
 
-The plugin options `workflowConcurrency` and `workflowMaxAgents` override the default concurrency and total agent-step limit for new runs. The registered `workflows_start` schema advertises the configured defaults. Explicit run values override them, and existing runs retain their recorded limits. To use eight concurrent agents, the total agent-step limit must also be at least eight.
+The plugin option `workflowConcurrency` sets concurrency for new runs. An explicitly configured `workflowMaxAgents` supplies a user-selected total-step limit. The registered `workflows_start` schema advertises configured values. Existing runs retain their original limits, including historical defaults omitted from compacted records. If a total-step limit is supplied, it must be at least as large as the requested concurrency to use that concurrency fully.
 
-`tokenBudget` measures cumulative native input and output tokens across worker turns. It is an admission threshold, not a hard generation cap: workers already running can exceed it before the next dispatch checks their usage. Multi-turn code investigation can consume much more than the final answer's token count. Choose the threshold for the whole run, including review steps, or omit it and use the agent and time limits.
+Task budgets are opt-in. Agents omit `tokenBudget`, `maxAgents`, `agentTimeoutMs`, and `timeoutMs` unless the user supplies a limit. If the user requests a budget without a value, the agent asks for that value. Agents do not estimate replacement values or insert hidden defaults. With no supplied budget, that dimension is unbounded. Concurrency, worker capacity, payload bounds, and cancellation still apply.
 
-The cumulative host-call cap is `maxAgents * 8 + 100`, including agent, phase, log, checkpoint, and nested-workflow calls. Nested saved workflows share that cap and the parent agent budget. Nesting is limited to four child levels.
+`tokenBudget` measures cumulative native input and output tokens across worker turns. It is an admission threshold, not a hard generation cap: workers already running can exceed it before the next dispatch checks their usage.
+
+When a total-step budget is supplied, the cumulative host-call cap is `maxAgents * 8 + 100`, including agent, phase, log, checkpoint, and nested-workflow calls. Without that budget, there is no derived cumulative cap. Nested saved workflows share any supplied parent budgets. Nesting is limited to four child levels.
 
 Helper bounds (`attempts`, `maxRounds`, and `consecutiveEmpty`) must be safe positive integers no greater than 1,000. Arguments, host-call payloads, and results are each limited to 1 MiB; error diagnostics are capped at 8 KiB. The runtime module allows 64 simultaneous interpreter calls, including nested calls, and rejects excess calls immediately. This is separate from the agent concurrency limit.
+
+Agents omit helper `attempts` and `maxRounds` unless the user supplies them. A recorded helper policy preserves the original three-attempt and ten-round defaults for older runs. New saved and nested executions inherit the parent run's policy.
 
 The configured Threads worker limit also applies across simultaneous runs owned by one coordinator. Its default is four workers. A token budget checks recorded usage at dispatch, including failed and interrupted attempts. Already-running agents can exceed the remaining budget. Unreported usage is marked unmeasured and blocks further budgeted dispatch.
 
 The same start key and identical input identify the same run. Start retries do not restart completed or stopped runs. Pause stops new scheduling and drains active steps. Stop interrupts active work. Resume uses the same recorded script and arguments, reconciles existing sessions, and reuses completed results. A changed step request under an existing key fails rather than returning a stale result. Save edits as a new workflow run.
 
+After upgrading from finite defaults, an old start request that omitted its budgets no longer has the same input fingerprint. Resume the existing run through `workflows_control`, or supply its original recorded limits for an exact start retry.
+
 A service restart leaves interrupted work available for explicit resume. Worktrees and session evidence are retained. A missing result after an interrupted write requires inspection; it does not prove that no write occurred.
 
+Unanswered checkpoints and interruptions send durable, deduplicated notices to the owner. Checkpoint notices include the exact key and prompt. Each interruption has a separate notice. Delivery failures retry at a later boundary, recovery, or inspection with the same message ID. A notice never supplies a checkpoint response or resumes the run. Resuming after the original deadline interrupts retained workers and fails the run.
+
 For an uncertain write, inspect its retained worker and directory. Use `threads_send` to ask that same worker to verify the existing effects and submit `workflows_result` without repeating completed actions. After its native execution finishes, resume the workflow. A missing worker session is not permission to replay its writes in a new session.
+
+Follow-ups produce a separate completion notice keyed to the admitted message. That notice reports native execution, not acceptance, and never replaces the worker's original report. If the worker already submitted a result, inspect the follow-up evidence separately. Compaction can hide an unrecorded completion from the SDK's context reader; that case remains unresolved rather than replaying work.
 
 Nested saved scripts are pinned to their run. Agent successes, exposed failures, and checkpoint responses replay in their original settlement order. An exposed failure cannot become a success during replay. If a selected profile's model, instructions, or permissions change, start a new run rather than treating its old result as evidence from the new profile.
 

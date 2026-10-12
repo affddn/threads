@@ -39,7 +39,11 @@ Press `x` to stop the run and interrupt its active workers. Completed results an
 
 Press `r` to resume. For a waiting checkpoint, enter a JSON response. For example, enter `true`, `42`, or a quoted string.
 
+Checkpoint and interruption notices reach the coordinator conversation with the run ID and the next control action. Inspect the run before responding or resuming.
+
 After a service restart, reopen the original conversation and select the run with `/workflows`. Resume reconciles its existing sessions before scheduling more work. It does not assume that an interrupted write left the directory unchanged.
+
+If a worker shows **Session failed** with a blocked-generation error, inspect the run, step, and worker named in that error. Follow the same recovery procedure after a plugin reload. A restart notice alone does not authorize the worker to continue.
 
 For an uncertain write, ask the agent to inspect the retained worker and directory. Send the resolution request to that same worker. After the worker reports and finishes, resume the run. Use the [recovery contract](../skills/workflow-authoring/references/runtime.md#start-and-control) for crash and legacy-journal limits.
 

@@ -25,12 +25,15 @@ export default Plugin.define({
       SessionContext["sessionID"],
       SessionContext["model"]
     >();
-    await ctx.session.hook("context", (event) => {
+    await ctx.session.hook("context", async (event) => {
       models.set(event.sessionID, event.model);
+      const diagnostics = await workers.reconcileFollowups(event.sessionID);
+      if (diagnostics.length) event.system.push({ type: "text", text:
+        `Managed follow-up recovery is incomplete; this is not task success. Failed records remain pending for retry. Inspect the named worker conversation and native/storage error, resolve the cause, then retry the identical threads_send key or allow the next recovery pass.\n${diagnostics.join("\n")}` });
     });
     await ctx.rpc.register(ThreadsRpc, {
       snapshot: async ({ coordinatorIDs }) => ({
-        workers: (await Promise.all(coordinatorIDs.map(workers.list))).flat(),
+        workers: (await Promise.all(coordinatorIDs.map((id) => workers.list(id, "snapshot")))).flat(),
       }),
       restore: async ({ coordinatorIDs }) => ({
         workers: (await Promise.all(coordinatorIDs.map(workers.restore))).flat(),
@@ -78,7 +81,7 @@ export default Plugin.define({
       editor.add({
         name: "send",
         description:
-          "Send a follow-up to your worker. Reuse key for an identical retry.",
+          "Send a follow-up to your worker. Reuse key for an identical retry. A separate completion notice names this message and its native outcome; inspect the evidence before accepting it. The original report remains unchanged.",
         input: Send,
         output: z.object({ workerID: z.string(), messageID: z.string() }),
         options: { namespace: "threads", codemode: false },

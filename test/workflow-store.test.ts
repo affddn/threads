@@ -62,6 +62,27 @@ test("run records survive reopening storage and exact admission rejects conflict
   expect((await reopened.get("workflow-a")).fingerprint).toBe("fingerprint");
 });
 
+test("compacted legacy limits stay finite while explicit null budgets survive reopen and RPC summaries", async () => {
+  const fixture = await disk();
+  const store = workflowStore(fixture.storage);
+  await store.create(run("legacy"));
+  const compacted = await fixture.storage.get("workflows/runs/legacy");
+  expect(compacted).toMatchObject({ version: 1, limits: {} });
+  expect((await workflowStore(fixture.storage).get("legacy")).limits).toEqual({
+    concurrency: 3, maxAgents: 4, agentTimeoutMs: 1_800_000, timeoutMs: 86_400_000,
+  });
+  const unbounded = run("unbounded");
+  unbounded.limits = { concurrency: 3, maxAgents: null, agentTimeoutMs: null, timeoutMs: null, tokenBudget: null };
+  await store.create(unbounded);
+  const reopened = workflowStore(fixture.storage);
+  await reopened.update(unbounded.id, (draft) => { draft.phase = "resumed"; });
+  expect((await fixture.storage.get("workflows/runs/unbounded"))).toMatchObject({ limits: {
+    maxAgents: null, agentTimeoutMs: null, timeoutMs: null, tokenBudget: null,
+  } });
+  expect(workflowSummary(await reopened.get(unbounded.id)).limits).toEqual(unbounded.limits);
+  expect((await reopened.list("owner-a")).find((item) => item.id === unbounded.id)?.limits).toEqual(unbounded.limits);
+});
+
 test("concurrent run updates retain every write and listings are owner scoped", async () => {
   const fixture = await disk();
   const store = workflowStore(fixture.storage);

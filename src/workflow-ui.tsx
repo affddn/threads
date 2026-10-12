@@ -7,6 +7,7 @@ import { workflowProgressing } from "./idle";
 import { themeColor, themeMuted } from "./activity-theme";
 import { Json } from "./workflow-types";
 import type { WorkflowRun, WorkflowSummary } from "./workflow-types";
+import { uiErrorMessage, uiState } from "./ui-location";
 
 const finished = new Set<WorkflowSummary["status"]>(["completed", "failed", "stopped"]);
 const sidebarRows = 5;
@@ -21,6 +22,7 @@ export function workflowUI(ctx: Plugin.Context, fallbackColor: RGBA) {
   let owner = "";
   let ownerGeneration = 0;
   let refreshInFlight: Promise<RefreshResult | undefined> | undefined;
+  let refreshPending = false;
   type OwnerContext = { ownerID: string; generation: number };
   type RefreshResult = { context: OwnerContext; runs: WorkflowSummary[] };
   const location = () => ctx.location ?? ctx.data.location.default();
@@ -48,24 +50,28 @@ export function workflowUI(ctx: Plugin.Context, fallbackColor: RGBA) {
     return !!current && current.ownerID === context.ownerID && current.generation === context.generation && !abort.signal.aborted;
   }
   function requestRefresh(context: OwnerContext) {
+    refreshPending = false;
     let request!: Promise<RefreshResult | undefined>;
     request = (async () => {
       try {
-        const snapshot = await rpc.snapshot({ ownerID: context.ownerID }, { location: location(), signal: abort.signal });
+        const snapshot = await uiState(ctx, [context.ownerID], (location) => rpc.snapshot({ ownerID: context.ownerID }, { location, signal: abort.signal }));
         if (!isCurrent(context)) return;
         setRuns(snapshot.runs);
         const id = selected()?.id;
         if (id) {
-          const run = await rpc.inspect({ ownerID: context.ownerID, runID: id }, { location: location(), signal: abort.signal });
+          const run = await uiState(ctx, [context.ownerID], (location) => rpc.inspect({ ownerID: context.ownerID, runID: id }, { location, signal: abort.signal }));
           if (!isCurrent(context)) return;
           if (selected()?.id === id) setSelected(run);
         }
         setError("");
         return { context, runs: snapshot.runs };
       } catch (cause) {
-        if (isCurrent(context)) setError(String(cause));
+        if (isCurrent(context)) setError(uiErrorMessage(cause));
       } finally {
-        if (refreshInFlight === request) refreshInFlight = undefined;
+        if (refreshInFlight === request) {
+          refreshInFlight = undefined;
+          if (refreshPending && !abort.signal.aborted) refreshInBackground();
+        }
       }
     })();
     refreshInFlight = request;
@@ -73,7 +79,11 @@ export function workflowUI(ctx: Plugin.Context, fallbackColor: RGBA) {
   }
   function refreshInBackground() {
     const context = synchronizeOwner();
-    if (!context || refreshInFlight || abort.signal.aborted) return;
+    if (!context || abort.signal.aborted) return;
+    if (refreshInFlight) {
+      refreshPending = true;
+      return;
+    }
     void requestRefresh(context);
   }
   async function refreshFresh() {
@@ -86,13 +96,13 @@ export function workflowUI(ctx: Plugin.Context, fallbackColor: RGBA) {
   async function openRun(id: string, expected = synchronizeOwner()) {
     if (!expected || !isCurrent(expected)) return;
     try {
-      const run = await rpc.inspect({ ownerID: expected.ownerID, runID: id }, { location: location(), signal: abort.signal });
+      const run = await uiState(ctx, [expected.ownerID], (location) => rpc.inspect({ ownerID: expected.ownerID, runID: id }, { location, signal: abort.signal }));
       if (!isCurrent(expected)) return;
       setSelected(run);
       setStepIndex(0);
       ctx.ui.panel.open("threads.workflows");
     } catch (cause) {
-      ctx.ui.toast.show({ message: String(cause), variant: "error" });
+      ctx.ui.toast.show({ message: uiErrorMessage(cause), variant: "error" });
     }
   }
   async function choose() {
@@ -151,7 +161,7 @@ export function workflowUI(ctx: Plugin.Context, fallbackColor: RGBA) {
       setSelected(result);
       await refreshFresh();
     } catch (cause) {
-      ctx.ui.toast.show({ message: String(cause), variant: "error" });
+      ctx.ui.toast.show({ message: uiErrorMessage(cause), variant: "error" });
     }
   }
   async function save() {
@@ -168,7 +178,7 @@ export function workflowUI(ctx: Plugin.Context, fallbackColor: RGBA) {
       const output = await rpc.save({ ownerID: run.ownerID, runID: run.id, name, scope }, { location: location(), signal: abort.signal });
       ctx.ui.toast.show({ message: `Saved ${ctx.ui.format.path(output.path)}`, variant: "success" });
     } catch (cause) {
-      ctx.ui.toast.show({ message: String(cause), variant: "error" });
+      ctx.ui.toast.show({ message: uiErrorMessage(cause), variant: "error" });
     }
   }
   const removePanel = ctx.ui.slot({

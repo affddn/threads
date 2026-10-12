@@ -199,6 +199,82 @@ def checkpoint_state():
     return final
 
 
+def owner_attention():
+    run = start("owner-attention", 'return await checkpoint("Approve the next phase?", {key:"human-approval"});')
+    waiting = settled(run, "waiting")
+    assert waiting["checkpoints"][0].get("response") is None, waiting
+
+    def notices():
+        return [message for message in messages(owner) if message["type"] == "synthetic"
+                and run["id"] in message.get("text", "")
+                and "human-approval" in message.get("text", "")]
+
+    first = eventually(lambda: notices())
+    assert len(first) == 1 and "Approve the next phase?" in first[0]["text"], first
+    assert "resume" in first[0]["text"].lower(), first
+    restart(hard=True)
+    recovered = inspect(run)
+    assert recovered["status"] == "interrupted", recovered
+    assert recovered["checkpoints"][0].get("response") is None, recovered
+    attention = eventually(lambda: (items if len(items := notices()) >= 2 else None))
+    assert len(attention) == 2, attention
+    interrupted = next(message for message in attention if message["id"] != first[0]["id"])
+    assert "interrupt" in interrupted["text"].lower(), interrupted
+    for _ in range(3):
+        inspect(run)
+    assert {message["id"] for message in notices()} == {message["id"] for message in attention}
+    control(run, action="resume")
+    settled(run, "waiting")
+    restart()
+    assert inspect(run)["status"] == "interrupted"
+    try:
+        repeated = eventually(lambda: (items if len(items := notices()) >= 3 else None))
+    except TimeoutError:
+        (artifacts / "repeated-interruption.json").write_text(json.dumps({
+            "run": inspect(run), "notices": notices(),
+            "inbox": sandbox.api("GET", f"/api/session/{owner}/inbox"),
+            "owner": sandbox.api("GET", f"/api/session/{owner}"),
+        }, indent=2))
+        raise
+    assert len(repeated) == 3 and len({message["id"] for message in repeated}) == 3, repeated
+    assert sum("checkpoint requires" in message["text"] for message in repeated) == 1, repeated
+    control(run, action="resume", checkpointKey="human-approval", response=False)
+    final = settled(run)
+    assert final["result"] is False and not final["steps"], final
+    return {"waitingNotice": first[0], "interruptionNotices": repeated[1:], "run": final}
+
+
+def followup_handoff():
+    report("FOLLOWUP_INITIAL", "original-result")
+    run = start("followup-handoff", 'return await agent("FOLLOWUP_INITIAL", {key:"worker",agent:"regression-role",access:"write"});')
+    original = settled(run)
+    worker = original["steps"][0]["workerID"]
+    effect = sandbox.directory / "followup-effect.txt"
+    provider.responses["FOLLOWUP_EFFECT"] = {
+        "name": "shell", "arguments": {"command": "printf 'one effect\\n' >> followup-effect.txt"},
+    }
+    request = {"workerID": worker, "key": "followup-effect", "text": "FOLLOWUP_EFFECT"}
+    sent = tool(owner, "threads_send", request)
+
+    def notices():
+        return [message for message in messages(owner) if message["type"] == "synthetic"
+                and worker in json.dumps(message) and sent["messageID"] in json.dumps(message)]
+
+    notice = eventually(lambda: notices())
+    assert len(notice) == 1, notice
+    eventually(lambda: worker not in sandbox.api("GET", "/api/session/active")["data"])
+    assert effect.read_text() == "one effect\n"
+    assert inspect(run)["steps"][0]["report"] == original["steps"][0]["report"]
+    assert tool(owner, "threads_send", request) == sent
+    restart()
+    tool(owner, "threads_list", {})
+    assert tool(owner, "threads_send", request) == sent
+    assert effect.read_text() == "one effect\n"
+    assert [message["id"] for message in notices()] == [notice[0]["id"]]
+    assert inspect(run)["steps"][0]["report"] == original["steps"][0]["report"]
+    return {"run": original, "send": sent, "notice": notice[0], "effect": effect.read_text()}
+
+
 def checkpoint_replay():
     report("ORDER_B_A", "b,a")
     report("ORDER_A_B", "a,b")
@@ -373,10 +449,29 @@ def worktree_handoff():
     return {"run": final, "verificationShell": shells[0]}
 
 
+def optional_budgets():
+    for index in range(9):
+        report(f"UNBOUNDED_STEP_{index}", index)
+    run = settled(start("unbounded-steps", '''return await pipeline(Array.from({length:9}, (_, i) => i),
+        i => agent("UNBOUNDED_STEP_"+i, {key:"item:"+i, agent:"regression-role"}));''', concurrency=1))
+    assert run["result"] == list(range(9)) and len(run["steps"]) == 9, run
+    assert all(run["limits"].get(field) is None for field in ["maxAgents", "agentTimeoutMs", "timeoutMs", "tokenBudget"]), run
+    finite = settled(start("explicit-step-budget", '''const results=[]; for (const i of [0,1,2])
+        results.push(await agent("UNBOUNDED_STEP_"+i, {key:"item:"+i, agent:"regression-role"})); return results;''', concurrency=1, maxAgents=2), "failed")
+    assert sum(step["status"] == "completed" for step in finite["steps"]) == 2, finite
+    cancellable = start("unbounded-cancel", 'await log("unbounded-running"); while (true) {}')
+    eventually(lambda: any(entry["text"] == "unbounded-running" for entry in inspect(cancellable)["logs"]))
+    started = time.monotonic()
+    control(cancellable, action="stop")
+    stopped = settled(cancellable, "stopped")
+    assert time.monotonic() - started < 5, stopped
+    return {"unbounded": run, "explicitBudget": finite, "cancelled": stopped}
+
+
 def configured_defaults():
     previous = start("previous-default", 'return await checkpoint("Continue", {key:"continue"});')
     previous_limits = settled(previous, "waiting")["limits"]
-    assert previous_limits["concurrency"] == 3 and previous_limits["maxAgents"] == 4
+    assert previous_limits["concurrency"] == 3 and previous_limits.get("maxAgents") is None
     config_path = sandbox.root / "config/opencode/opencode.json"
     original = config_path.read_text()
     configured = json.loads(original)
@@ -427,6 +522,8 @@ cases = {
     "queued-budget": token_budget,
     "failed-usage": failed_usage,
     "checkpoint-state": checkpoint_state,
+    "owner-attention": owner_attention,
+    "followup-handoff": followup_handoff,
     "checkpoint-replay": checkpoint_replay,
     "failed-replay": failed_replay,
     "reported-crash": reported_crash,
@@ -436,6 +533,7 @@ cases = {
     "nesting-limit": nesting_limit,
     "worktree-handoff": worktree_handoff,
     "runtime-deadline": runtime_deadline,
+    "optional-budgets": optional_budgets,
     "configured-defaults": configured_defaults,
 }
 selected = options.case or list(cases)

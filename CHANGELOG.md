@@ -1,5 +1,23 @@
 # Changelog
 
+## Unreleased
+
+- Add durable workflow heartbeat tools and a packaged, connect-only macOS runner. Optional wake caps and deadlines survive restarts and run replacement without replenishment.
+- New workflows have no built-in token, total-step, runtime, retry-attempt, or discovery-round budgets. Budgets are opt-in, and authoring guidance forbids agent-estimated limits. Existing runs retain their original limits and helper behavior.
+- Workflows notify their coordinator when a checkpoint needs a response or execution is interrupted. Durable receipts prevent duplicate notices after inspection or restart.
+- Worker follow-ups send a separate, message-correlated completion notice while preserving the original report. Rejected sends no longer grant workflow execution.
+- Resuming an expired workflow interrupts its retained workers before reporting the timeout.
+- Workflow lists refresh after an in-flight request when you switch conversations or another update arrives.
+- Worker snapshots and tab restoration no longer resume pending follow-ups. A rejected follow-up wake cannot block these UI reads.
+- Background follow-up recovery keeps rejected records pending and continues with healthy records. Recovery failures no longer prevent the coordinator's next model turn.
+- Heartbeat policy updates preserve omitted settings, including custom intervals and acknowledgement limits.
+- Heartbeat installation preserves existing launchers on collisions and waits for confirmed removal during uninstall. Native wildcard service addresses connect through loopback.
+- Global terminal state falls back from a missing Location to another observed Location. Successful worker snapshots remove stale rows for their requested coordinators.
+- Managed-worker notices display structured RPC messages and missing-directory paths instead of `[object Object]`.
+- Worker permissions preserve ordered caller and role exceptions while retaining explicit denies and external-directory approval requests.
+- Engine unloads retain typed interruption details. Heartbeats can request inspection of interrupted coordinator checkpoints with no worker steps, while human gates remain held.
+- Blocked worker recovery identifies its workflow and notifies the owner. Restart notices do not authorize worker execution.
+
 ## 0.2.8
 
 - Removed the workflow status line above the prompt. Use `/workflows` to open a run's panel.

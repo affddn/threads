@@ -13,6 +13,7 @@ import { ThreadsIndicator } from "./activity-footer";
 import { ActivityPicker } from "./activity-picker";
 import { workInProgress } from "./idle";
 import { ThreadsRpc, WorkerView } from "./rpc";
+import { applyWorkerSnapshot, uiState } from "./ui-location";
 
 type Session = NonNullable<
   ReturnType<Plugin.Context["data"]["session"]["get"]>
@@ -296,14 +297,16 @@ export function activity(
         ]),
       ];
       for (let index = 0; index < ids.length && !stopped; index += 100) {
-        const result = await rpc.snapshot(
-          { coordinatorIDs: ids.slice(index, index + 100) },
+        const coordinatorIDs = ids.slice(index, index + 100);
+        const result = await uiState(ctx, coordinatorIDs, (location) => rpc.snapshot(
+          { coordinatorIDs },
           {
             signal: abort.signal,
-            location: ctx.location ?? ctx.data.location.default(),
+            location,
           },
-        );
-        for (const worker of result.workers) workers.set(worker.workerID, worker);
+        ));
+        if (stopped) return;
+        applyWorkerSnapshot(workers, coordinatorIDs, result.workers);
       }
       for (const id of new Set(
         [...workers.values()].map((worker) => worker.coordinatorID),
@@ -429,8 +432,8 @@ export function activity(
     openList,
     listOpened: (id: string) => openedHere().includes(id),
     forgetListOpened,
-    updateWorkers(values: z.infer<typeof WorkerView>[]) {
-      for (const worker of values) workers.set(worker.workerID, worker);
+    updateWorkers(values: z.infer<typeof WorkerView>[], coordinatorIDs?: string[]) {
+      applyWorkerSnapshot(workers, coordinatorIDs ?? [], values);
       changed();
     },
     dispose() {

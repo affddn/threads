@@ -86,11 +86,13 @@ export const fingerprint = (input: z.infer<typeof Spawn>) =>
   ]);
 
 const locks = new Map<string, Promise<void>>();
-type WorkflowExecutionGrant = { watching: boolean };
-const workflowState = globalThis as typeof globalThis & { __opWorkflowExecutionGrantsV2?: Map<string, WorkflowExecutionGrant> };
-const workflowExecutionGrants = workflowState.__opWorkflowExecutionGrantsV2 ??= new Map<string, WorkflowExecutionGrant>();
+type WorkflowExecutionGrant = { watching: boolean; revoked: boolean };
+const workflowState = globalThis as typeof globalThis & { __opWorkflowExecutionGrantsV3?: Map<string, WorkflowExecutionGrant> };
+const workflowExecutionGrants = workflowState.__opWorkflowExecutionGrantsV3 ??= new Map<string, WorkflowExecutionGrant>();
 export function authorizeWorkflowExecution(workerID: string) {
-  workflowExecutionGrants.set(workerID, { watching: false });
+  const grant = { watching: false, revoked: false };
+  workflowExecutionGrants.set(workerID, grant);
+  return grant;
 }
 export function workflowExecutionAuthorized(workerID: string) {
   return workflowExecutionGrants.has(workerID);
@@ -100,6 +102,7 @@ export function watchWorkflowExecution(workerID: string, untilIdle: () => Promis
   if (!grant || grant.watching) return;
   grant.watching = true;
   const revoke = () => {
+    grant.revoked = true;
     if (workflowExecutionGrants.get(workerID) === grant) workflowExecutionGrants.delete(workerID);
   };
   void untilIdle().then(revoke, revoke);
@@ -148,11 +151,9 @@ export function workflowPermissions(
   return [
     ...(worker.access === "read" ? [
       { action: "*", resource: "*", effect: "deny" as const },
-      ...inherited.filter((rule) => rule.effect === "ask").map((rule) => ({ ...rule, effect: "deny" as const })),
-      ...worker.role.flatMap((rule) => readActions
+      ...workerRestrictions(inherited, [{ action: "*", resource: "*", effect: "deny" }, ...worker.role.flatMap((rule) => readActions
         .filter((action) => permissionMatches(rule.action, action))
-        .map((action) => ({ ...rule, action }))),
-      ...inherited.filter((rule) => rule.effect === "deny"),
+        .map((action) => ({ ...rule, action })))], "allow"),
     ] : workerRestrictions(inherited, worker.role)),
     ...grantAccess(inherited, worker.role, worker.paths),
     { action: "subagent", resource: "*", effect: "deny" },
@@ -174,6 +175,141 @@ export function threads(
     `visibility/${link.workerID}/${link.reportMessageID}`;
   const initializedKey = (link: z.infer<typeof Link>) =>
     `initialized/${link.workerID}/${link.initialMessageID}`;
+
+  const FollowupBase = z.object({
+    workerID: sessionID, coordinatorID: sessionID, messageID,
+    notificationID: messageID, text: z.string(),
+  }).strict();
+  const Completion = z.object({ outcome: z.enum(["succeeded", "failed", "interrupted"]), idleMessageID: messageID }).strict();
+  const Followup = z.discriminatedUnion("state", [
+    FollowupBase.extend({ state: z.enum(["prepared", "accepted"]) }),
+    FollowupBase.extend({ state: z.enum(["completed", "notified"]), completion: Completion }),
+  ]);
+  const followupKey = (workerID: string, id: string) => `followups/${workerID}/${id}`;
+  const pendingKey = (entry: z.infer<typeof Followup>) => `followup-pending/${entry.coordinatorID}/${entry.messageID}`;
+  const watching = new Set<string>();
+
+  async function finishFollowup(entry: z.infer<typeof Followup>) {
+    if (entry.state === "notified") return;
+    if (entry.state !== "completed") {
+      const messages = await ctx.session.context({ sessionID: entry.workerID });
+      const index = messages.findIndex(message => message.id === entry.messageID && message.type === "synthetic");
+      if (index === -1) return;
+      // A session's previous outcome/idle cannot settle a newly admitted input.
+      const idle = messages.slice(index + 1).find(message => message.type === "idle");
+      if (!idle || idle.type !== "idle") return;
+      entry = { ...entry, state: "completed", completion: { outcome: idle.outcome, idleMessageID: SessionMessage.ID.make(idle.id) } };
+      await ctx.storage.set(followupKey(entry.workerID, entry.messageID), entry);
+    }
+    const notification = {
+      sessionID: entry.coordinatorID, id: entry.notificationID, delivery: "queue" as const,
+      text: `Managed worker ${entry.workerID} follow-up ${entry.messageID} native execution ${entry.completion.outcome}. Native completion is not a verdict; inspect the worker conversation and evidence. The original report is unchanged.`,
+      metadata: { opThreadsFollowup: { workerID: entry.workerID, messageID: entry.messageID, ...entry.completion } },
+    };
+    const admitted = await ctx.session.synthetic({ ...notification, resume: false });
+    if (await needsWake(entry.coordinatorID, entry.notificationID, admitted.time.created)) {
+      await ctx.session.synthetic({ ...notification, resume: true });
+    }
+    await ctx.storage.set(followupKey(entry.workerID, entry.messageID), { ...entry, state: "notified" });
+    await ctx.storage.remove(pendingKey(entry));
+  }
+
+  async function needsWake(sessionID: Session.ID, id: SessionMessage.ID, admittedAt: number) {
+    const messages = await ctx.session.context({ sessionID });
+    if (messages.some(message => message.id === id)) return false;
+    // Absence in the bounded context is not proof of pending work after compaction.
+    return !messages.some(message => message.type === "compaction" && message.status === "completed" && message.time.created >= admittedAt);
+  }
+
+  function watchFollowup(entry: z.infer<typeof Followup>) {
+    if (watching.has(entry.messageID)) return;
+    watching.add(entry.messageID);
+    void ctx.session.wait({ sessionID: entry.workerID }).then(() => serialized(`followup/${entry.workerID}`, async () => {
+      const current = Followup.parse(await ctx.storage.get(followupKey(entry.workerID, entry.messageID)));
+      if (current.state !== "notified") await finishFollowup(current);
+    })).catch(() => {
+      // The durable pending record is retried by the next bounded reconciliation.
+    }).finally(() => watching.delete(entry.messageID));
+  }
+
+  async function deliverFollowup(entry: z.infer<typeof Followup>, workflow: boolean, recovery = false) {
+    if (entry.state === "notified") return;
+    if (entry.state === "completed") return finishFollowup(entry);
+    // Admission without wake validates native conflicts before any execution grant exists.
+    const clearRejected = async () => {
+      if (recovery) return;
+      await ctx.storage.remove(pendingKey(entry));
+      await ctx.storage.remove(followupKey(entry.workerID, entry.messageID));
+    };
+    const admitted = await ctx.session.synthetic({ sessionID: entry.workerID, id: entry.messageID,
+      text: entry.text, delivery: "queue", resume: false }).catch(async (error: unknown) => {
+        if (z.object({ _tag: z.literal("Session.SyntheticConflictError") }).safeParse(error).success) await clearRejected();
+        throw error;
+      });
+    if (admitted.payload.text !== entry.text) {
+      await clearRejected();
+      throw new Error("This send key already belongs to different text");
+    }
+    entry = { ...entry, state: "accepted" };
+    await ctx.storage.set(followupKey(entry.workerID, entry.messageID), entry);
+    // Reopening after wake must not wake an already promoted input again.
+    if (await needsWake(entry.workerID, entry.messageID, admitted.time.created)) {
+      const previousGrant = workflowExecutionGrants.get(entry.workerID);
+      const grant = workflow ? authorizeWorkflowExecution(entry.workerID) : undefined;
+      try {
+        await ctx.session.synthetic({ sessionID: entry.workerID, id: entry.messageID,
+          text: entry.text, delivery: "queue", resume: true });
+        if (workflow) watchWorkflowExecution(entry.workerID, () => ctx.session.wait({ sessionID: entry.workerID }));
+      } catch (error) {
+        if (grant && workflowExecutionGrants.get(entry.workerID) === grant) {
+          if (previousGrant && !previousGrant.revoked) workflowExecutionGrants.set(entry.workerID, previousGrant);
+          else workflowExecutionGrants.delete(entry.workerID);
+        }
+        throw error;
+      }
+    }
+    await finishFollowup(entry);
+    watchFollowup(entry);
+  }
+
+  async function reconcileFollowups(coordinatorID: string) {
+    const diagnostics: string[] = [];
+    let failures = 0;
+    const failed = (key: string, error: unknown) => {
+      failures++;
+      if (diagnostics.length < 5) diagnostics.push(`${key.slice(0, 180)}: ${
+        (error instanceof Error ? error.message : "Recovery rejected; inspect native session and storage").slice(0, 240)}`);
+    };
+    try {
+      const cursorKey = `followup-cursor/${coordinatorID}`;
+      const cursor = await ctx.storage.get(cursorKey);
+      const page = await ctx.storage.scan({ prefix: `followup-pending/${coordinatorID}/`, limit: 100,
+        after: cursor === undefined ? undefined : z.string().parse(cursor) });
+      for (const item of page.entries) {
+        let target = item.key;
+        try {
+          const pending = Followup.parse(item.value);
+          target = `Worker ${pending.workerID} follow-up ${pending.messageID}`;
+          await serialized(`followup/${pending.workerID}`, async () => {
+            const worker = await owned(coordinatorID, pending.workerID);
+            const entry = Followup.parse(await ctx.storage.get(followupKey(pending.workerID, pending.messageID)));
+            if (entry.coordinatorID !== coordinatorID) throw new Error("Follow-up ownership mismatch");
+            if (entry.state === "notified") await ctx.storage.remove(item.key);
+            else await deliverFollowup(entry, worker.session.metadata?.opWorkflow !== undefined, true);
+          });
+        } catch (error) {
+          failed(target, error);
+        }
+      }
+      // Advance past failed records too; wrapping the cursor retries them on a later pass.
+      if (page.next === undefined) await ctx.storage.remove(cursorKey);
+      else await ctx.storage.set(cursorKey, page.next);
+    } catch (error) {
+      failed(`Follow-up storage for ${coordinatorID}`, error);
+    }
+    if (failures > diagnostics.length) diagnostics.push(`${failures - diagnostics.length} additional recovery failures in this page`);
+    return diagnostics;
+  }
 
   async function initialized(session: NativeSession, link: z.infer<typeof Link>) {
     return session.metadata?.opThreadsRole !== true ||
@@ -295,7 +431,8 @@ export function threads(
     };
   }
 
-  async function list(coordinatorID: string) {
+  async function list(coordinatorID: string, mode: "reconcile" | "snapshot" = "reconcile") {
+    if (mode === "reconcile") await reconcileFollowups(coordinatorID);
     const workers: z.infer<typeof WorkerView>[] = [];
     let after: string | undefined;
     do {
@@ -338,6 +475,7 @@ export function threads(
 
   return {
     list,
+    reconcileFollowups,
     async preparePrompt(actor: string, messageID: string, callerAgent: unknown) {
       const session = await ctx.session.get({ sessionID: actor });
       if (session.metadata?.opThreadsRole !== true) return;
@@ -353,7 +491,7 @@ export function threads(
       if (!workflow.success) return;
       const link = workerLink(session);
       if (await initialized(session, link)) {
-        authorizeWorkflowExecution(actor);
+        if (!workflowExecutionAuthorized(actor)) authorizeWorkflowExecution(actor);
         return;
       }
       await prepareRole(session, link, messageID, workflow.data.callerAgent);
@@ -374,7 +512,7 @@ export function threads(
       return view(session);
     },
     async restore(coordinatorID: string) {
-      const workers = await list(coordinatorID);
+      const workers = await list(coordinatorID, "snapshot");
       return Promise.all(
         workers.map(async (worker) => {
           if (!worker.hidden) return worker;
@@ -669,29 +807,36 @@ export function threads(
       });
     },
     async send(actor: string, input: z.infer<typeof Send>) {
-      const { session, link } = await owned(actor, input.workerID);
-      if (!await initialized(session, link)) {
-        throw new Error("Worker initialization is pending. Retry the original threads_spawn request.");
-      }
-      const id = SessionMessage.ID.make(
-        `msg_${digest([input.workerID, "send", input.key]).slice(0, 32)}`,
-      );
-      if (session.metadata?.opWorkflow !== undefined) authorizeWorkflowExecution(input.workerID);
-      const admitted = await ctx.session.synthetic({
-        sessionID: input.workerID,
-        id,
-        text: input.text,
-        delivery: "queue",
-        resume: true,
+      return serialized(`followup/${input.workerID}`, async () => {
+        const { session, link } = await owned(actor, input.workerID);
+        if (!await initialized(session, link)) {
+          throw new Error("Worker initialization is pending. Retry the original threads_spawn request.");
+        }
+        const id = SessionMessage.ID.make(
+          `msg_${digest([input.workerID, "send", input.key]).slice(0, 32)}`,
+        );
+        const key = followupKey(input.workerID, id);
+        const stored = await ctx.storage.get(key);
+        const entry = Followup.parse(stored ?? {
+          workerID: input.workerID, coordinatorID: actor, messageID: id,
+          notificationID: SessionMessage.ID.make(`msg_${digest([input.workerID, id, "followup-completion"]).slice(0, 32)}`),
+          text: input.text, state: "prepared",
+        });
+        if (entry.text !== input.text || entry.coordinatorID !== actor) {
+          throw new Error("This send key already belongs to different text");
+        }
+        if (stored === undefined) await ctx.storage.set(key, entry);
+        if (entry.state !== "notified") {
+          await ctx.storage.set(pendingKey(entry), entry);
+          await deliverFollowup(entry, session.metadata?.opWorkflow !== undefined);
+        }
+        if ((await ctx.storage.get(reportKey(link))) !== undefined) {
+          await ctx.storage.set(visibilityKey(link), false);
+        } else {
+          await ctx.storage.remove(visibilityKey(link));
+        }
+        return { workerID: input.workerID, messageID: id };
       });
-      if (admitted.payload.text !== input.text)
-        throw new Error("This send key already belongs to different text");
-      if ((await ctx.storage.get(reportKey(link))) !== undefined) {
-        await ctx.storage.set(visibilityKey(link), false);
-      } else {
-        await ctx.storage.remove(visibilityKey(link));
-      }
-      return { workerID: input.workerID, messageID: admitted.id };
     },
     async interrupt(actor: string, input: z.infer<typeof WorkerTarget>) {
       await owned(actor, input.workerID);

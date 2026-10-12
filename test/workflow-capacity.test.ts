@@ -2,7 +2,22 @@ import { expect, test } from "bun:test";
 import type { Plugin } from "@opencode/plugin";
 import { withWorkflowSlot } from "../src/workflow-worker";
 import { workflowStore } from "../src/workflow-store";
-import { WorkflowLimits, WorkflowRun } from "../src/workflow-types";
+import { WorkflowLimits, WorkflowRun, WorkflowStart } from "../src/workflow-types";
+
+test("start budgets default to explicit null and configured user step caps remain intentional defaults", () => {
+  const request = { key: "budget", script: 'export const meta = {name:"test", description:"test"}; return null;' };
+  expect(WorkflowStart.parse(request)).toMatchObject({
+    concurrency: 3, maxAgents: null, agentTimeoutMs: null, timeoutMs: null,
+  });
+  const configured = WorkflowStart.safeExtend({
+    maxAgents: WorkflowStart.shape.maxAgents.default(WorkflowStart.shape.maxAgents.parse(8)),
+  });
+  expect(configured.parse(request).maxAgents).toBe(8);
+  expect(configured.parse({ ...request, maxAgents: 2 }).maxAgents).toBe(2);
+  expect(configured.parse({ ...request, maxAgents: null }).maxAgents).toBeNull();
+  expect(WorkflowStart.shape.maxAgents.parse(undefined)).toBeNull();
+  expect(WorkflowLimits.parse({}).maxAgents).toBe(4);
+});
 
 test("public workflow limits accept their exact ceilings and reject one beyond", () => {
   expect(WorkflowLimits.parse({ concurrency: 8, maxAgents: 1000, agentTimeoutMs: 604_800_000, timeoutMs: 604_800_000 }))

@@ -86,6 +86,7 @@ Use a Threads workflow when many agents should run in parallel, or when later st
 | --- | --- |
 | Start workers, pick roles, and follow up | [Work with workers](docs/workers.md) |
 | Run, watch, and save workflows | [Run a dynamic workflow](docs/workflows.md) |
+| Monitor unattended workflows | [Workflow heartbeats](docs/heartbeat.md) |
 | Change limits, commands, and shortcuts | [Configuration](docs/configuration.md) |
 | Look up tools, fields, and data shapes | [Reference](docs/reference.md) |
 | Understand retries, permissions, and recovery | [How Threads works](docs/how-it-works.md) |

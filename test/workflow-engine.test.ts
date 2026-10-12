@@ -49,6 +49,7 @@ async function harness(mode: "valid" | "repair" | "missing" | "reported-fail" | 
   const waits = new Map<string, Promise<void>>();
   const deliveries: string[] = [];
   const deliveryTexts: string[] = [];
+  let deliveryFailures = 0;
   let profileSystem = "profile-v1";
   let profilePermissions: unknown[] = [{ action: "read", resource: "*", effect: "allow" }];
   const saved = new Map<string, string>();
@@ -66,6 +67,10 @@ async function harness(mode: "valid" | "repair" | "missing" | "reported-fail" | 
       async synthetic(input: { id: string; text: string; metadata?: unknown }) {
         deliveries.push(input.id);
         deliveryTexts.push(input.text);
+        if (deliveryFailures > 0) {
+          deliveryFailures--;
+          throw new Error("Synthetic delivery acknowledgement lost");
+        }
         return { id: input.id, payload: { text: input.text, metadata: input.metadata } };
       },
     },
@@ -99,6 +104,7 @@ async function harness(mode: "valid" | "repair" | "missing" | "reported-fail" | 
   const manual = new Map<string, () => void>();
   const rejected = new Map<string, (reason: Error) => void>();
   const spawnedStepKeys: string[] = [];
+  const spawnWaiters = new Map<string, (() => void)[]>();
   const workerEvents: string[] = [];
   const validationErrors: string[] = [];
   const reservations: string[] = [];
@@ -135,6 +141,8 @@ async function harness(mode: "valid" | "repair" | "missing" | "reported-fail" | 
       const wait = new Promise<void>((done, reject) => { resolve = done; rejected.set(workerID, reject); });
       void wait.catch(() => {});
       waits.set(workerID, wait);
+      for (const notify of spawnWaiters.get(String(stepKey)) ?? []) notify();
+      spawnWaiters.delete(String(stepKey));
       if (mode === "manual" || mode === "timeout-race" || mode === "timeout-reject" || mode === "large-error") {
         manual.set(workerID, resolve);
         return { workerID };
@@ -196,11 +204,21 @@ async function harness(mode: "valid" | "repair" | "missing" | "reported-fail" | 
   return {
     api, ownerID, directory, deliveries, deliveryTexts, writes, validationErrors, worktreeProjects, reservations, spawnInputs, spawnScopes, spawns: () => spawns, file,
     reopen: engine,
+    failDeliveries: (count: number) => { deliveryFailures = count; },
     setProfileSystem: (value: string) => { profileSystem = value; },
     setProfilePermissions: (value: unknown[]) => { profilePermissions = value; },
     setOwnerPermissions: (value: unknown[]) => { sessions.get(ownerID)!.permissions = value; },
+    setRestartNotice: (workerID: string) => {
+      const session = sessions.get(workerID)!;
+      session.metadata = { ...(session.metadata as Record<string, unknown>), notice: "restart" };
+    },
     setSaved: (name: string, value: string) => { saved.set(name, value); },
     spawnedStepKeys,
+    waitForSpawn: (stepKey: string) => spawnedStepKeys.includes(stepKey)
+      ? Promise.resolve()
+      : new Promise<void>((resolve) => {
+        spawnWaiters.set(stepKey, [...(spawnWaiters.get(stepKey) ?? []), resolve]);
+      }),
     workerEvents,
     blockWorktreeCreation: () => {
       let entered!: () => void;
@@ -298,6 +316,229 @@ async function reaches(api: ReturnType<typeof workflowEngine>, ownerID: string, 
 }
 
 describe("durable workflow engine", () => {
+  for (const boundary of ["dispose", "recover"] as const) {
+    test(`lifecycle provenance: ${boundary} persists typed cause and resume clears it`, async () => {
+      const fixture = await harness("valid");
+      let reopened: ReturnType<typeof workflowEngine> | undefined;
+      try {
+        const started = await fixture.api.start(fixture.ownerID, WorkflowStart.parse({ key: `provenance-${boundary}`, script: `export const meta = { name: "provenance", description: "inspection" }; return await checkpoint("Inspect", { key: "inspect", reviewer: "coordinator" });` }), { agent: "caller", model: { providerID: "test", id: "model" } });
+        const waiting = await reaches(fixture.api, fixture.ownerID, started.id, "waiting");
+        await fixture.api.dispose();
+        if (boundary === "recover") await fixture.setStorage(`workflows/runs/${started.id}`, waiting);
+        reopened = fixture.reopen();
+        const interrupted = await reopened.get(fixture.ownerID, started.id);
+        expect(interrupted.interruption).toEqual({ kind: boundary === "dispose" ? "engine-disposed" : "lease-lost", priorStatus: "waiting", at: expect.any(Number) });
+        await reopened.control(fixture.ownerID, { runID: started.id, action: "resume", checkpointKey: "inspect", response: true });
+        expect((await settled(reopened, fixture.ownerID, started.id)).interruption).toBeUndefined();
+      } finally { await reopened?.dispose(); await fixture.api.dispose(); }
+    });
+  }
+  for (const status of ["pausing", "paused", "stopping", "stopped"] as const) {
+    test(`lifecycle provenance: disposal and recovery preserve ${status} intent`, async () => {
+      const fixture = await harness("valid");
+      let reopened: ReturnType<typeof workflowEngine> | undefined;
+      try {
+        const started = await fixture.api.start(fixture.ownerID, WorkflowStart.parse({ key: `intent-${status}`, script: `export const meta = { name: "intent", description: "control" }; return await checkpoint("Inspect", { key: "inspect", reviewer: "coordinator" });` }), { agent: "caller", model: { providerID: "test", id: "model" } });
+        await reaches(fixture.api, fixture.ownerID, started.id, "waiting");
+        await fixture.mutateRun(started.id, (run) => { run.status = status; });
+        await fixture.api.dispose();
+        reopened = fixture.reopen();
+        const recovered = await reopened.get(fixture.ownerID, started.id);
+        expect(recovered.status).toBe(status === "pausing" ? "paused" : status === "stopping" ? "stopped" : status);
+        expect(recovered.interruption).toBeUndefined();
+        expect(fixture.spawns()).toBe(0);
+      } finally { await reopened?.dispose(); await fixture.api.dispose(); }
+    });
+  }
+  for (const boundary of ["checkpoint", "dispose", "recover"] as const) {
+    test(`owner liveness: ${boundary} delivers exact run/checkpoint and explicit-resume guidance`, async () => {
+      const fixture = await harness("valid");
+      let reopened: ReturnType<typeof workflowEngine> | undefined;
+      try {
+        const started = await fixture.api.start(fixture.ownerID, WorkflowStart.parse({
+          key: `owner-liveness-${boundary}`,
+          script: `export const meta = { name: "owner-liveness", description: "Human approval remains unanswered" };
+return await checkpoint("Approve the next phase?", { key: "human-approval" });`,
+          args: null,
+        }), { agent: "caller", model: { providerID: "test", id: "model" } });
+        const waiting = await reaches(fixture.api, fixture.ownerID, started.id, "waiting");
+        expect(waiting.checkpoints.map(({ key, prompt }) => ({ key, prompt }))).toEqual([{ key: "human-approval", prompt: "Approve the next phase?" }]);
+        if (boundary !== "checkpoint") {
+          await fixture.api.dispose();
+          if (boundary === "recover") {
+            // Retain the durable waiting snapshot, as a process crash would.
+            await fixture.setStorage(`workflows/runs/${started.id}`, waiting);
+            fixture.deliveries.length = 0;
+            fixture.deliveryTexts.length = 0;
+          }
+          reopened = fixture.reopen();
+        }
+        const observed = await (reopened ?? fixture.api).get(fixture.ownerID, started.id);
+        expect(observed.status).toBe(boundary === "checkpoint" ? "waiting" : "interrupted");
+        expect(observed.checkpoints[0].response).toBeUndefined();
+        expect(observed.result).toBeUndefined();
+        expect(fixture.spawns()).toBe(0);
+        console.log(JSON.stringify({ boundary, runID: started.id, status: observed.status,
+          checkpoints: observed.checkpoints, deliveries: fixture.deliveries, deliveryTexts: fixture.deliveryTexts }));
+        // Match the requested boundary, not an earlier checkpoint notice.
+        const notice = fixture.deliveryTexts.find((text) => text.includes(started.id) && text.includes("human-approval") &&
+          (boundary === "checkpoint" ? /checkpoint requires/i.test(text) : /interrupted/i.test(text)));
+        expect(notice, `Owner needs a synthetic ${boundary} notice naming the exact run and unanswered checkpoint`).toBeDefined();
+        expect(notice).toContain("Approve the next phase?");
+        expect(notice).toMatch(/resume/i);
+        expect(notice).toMatch(/explicit|response/i);
+        if (boundary !== "checkpoint") expect(notice).toMatch(/interrupt|restart|stopped/i);
+        expect(fixture.deliveries.length).toBeGreaterThan(0);
+      } finally {
+        await reopened?.dispose();
+        await fixture.api.dispose();
+      }
+    });
+  }
+
+  test("owner liveness: expired resume interrupts retained executing worker", async () => {
+    const fixture = await harness("manual");
+    const timeoutMs = 86_400_000;
+    let reopened: ReturnType<typeof workflowEngine> | undefined;
+    try {
+      const started = await fixture.api.start(fixture.ownerID, WorkflowStart.parse({ key: "expired", script, timeoutMs }), {
+        agent: "caller", model: { providerID: "test", id: "model" },
+      });
+      for (let count = 0; count < 200 && fixture.spawns() === 0; count++) await Bun.sleep(5);
+      expect(fixture.spawns()).toBe(1);
+      await fixture.api.dispose();
+      await fixture.mutateRun(started.id, (run) => { run.created = Date.now() - timeoutMs - 1; });
+      fixture.workerEvents.length = 0;
+      reopened = fixture.reopen();
+      await reopened.control(fixture.ownerID, { runID: started.id, action: "resume" });
+      const failed = await settled(reopened, fixture.ownerID, started.id);
+      expect(failed.error).toBe("Workflow timeout exceeded");
+      expect(failed.steps[0].status).toBe("running");
+      expect(fixture.workerEvents).toContain("interrupt-end");
+      expect(fixture.spawns()).toBe(1);
+    } finally { await reopened?.dispose(); await fixture.api.dispose(); }
+  });
+
+  test("owner liveness: ambiguous delivery retries its ID, recovery and inspection deduplicate", async () => {
+    const fixture = await harness("valid");
+    let reopened: ReturnType<typeof workflowEngine> | undefined;
+    try {
+      fixture.failDeliveries(100);
+      const started = await fixture.api.start(fixture.ownerID, WorkflowStart.parse({ key: "retry-notice",
+        script: `export const meta = { name: "retry", description: "retry" }; return await checkpoint("Approval?", { key: "approve" });`,
+      }), { agent: "caller", model: { providerID: "test", id: "model" } });
+      const waiting = await reaches(fixture.api, fixture.ownerID, started.id, "waiting");
+      expect(waiting.error).toBeUndefined();
+      expect(waiting.checkpoints[0].response).toBeUndefined();
+      expect(waiting.attention?.checkpoints ?? []).toEqual([]);
+      fixture.failDeliveries(0);
+      await fixture.api.get(fixture.ownerID, started.id);
+      const checkpointIDs = fixture.deliveries.filter((_, index) => /checkpoint requires/.test(fixture.deliveryTexts[index]));
+      expect(checkpointIDs.length).toBeGreaterThan(1);
+      expect(new Set(checkpointIDs).size).toBe(1);
+      fixture.failDeliveries(100);
+      await fixture.api.dispose();
+      const interrupted = WorkflowRun.parse(await fixture.getStorage(`workflows/runs/${started.id}`));
+      expect(interrupted.status).toBe("interrupted");
+      expect(interrupted.attention?.deliveredInterruption).toBe(0);
+      fixture.failDeliveries(1);
+      reopened = fixture.reopen();
+      await reopened.get(fixture.ownerID, started.id);
+      await reopened.get(fixture.ownerID, started.id);
+      const interruptionIDs = fixture.deliveries.filter((_, index) => /interrupted:/.test(fixture.deliveryTexts[index]));
+      expect(interruptionIDs.length).toBeGreaterThan(1);
+      expect(new Set(interruptionIDs).size).toBe(1);
+      const before = fixture.deliveries.length;
+      const writes = fixture.writes.length;
+      await Promise.all([reopened.get(fixture.ownerID, started.id), reopened.list(fixture.ownerID), fixture.api.get(fixture.ownerID, started.id)]);
+      const another = fixture.reopen();
+      try { await another.get(fixture.ownerID, started.id); } finally { await another.dispose(); }
+      expect(fixture.deliveries.length).toBe(before);
+      expect(fixture.writes.length).toBe(writes);
+    } finally { await reopened?.dispose(); await fixture.api.dispose(); }
+  });
+
+  test("owner liveness: teardown retains a pending notice instead of admitting into a stopping service", async () => {
+    const fixture = await harness("valid");
+    let reopened: ReturnType<typeof workflowEngine> | undefined;
+    try {
+      const started = await fixture.api.start(fixture.ownerID, WorkflowStart.parse({ key: "shutdown-notice",
+        script: `export const meta = { name: "shutdown", description: "shutdown" }; return await checkpoint("Approval?", { key: "approve" });`,
+      }), { agent: "caller", model: { providerID: "test", id: "model" } });
+      await reaches(fixture.api, fixture.ownerID, started.id, "waiting");
+      const delivered = fixture.deliveries.length;
+      await fixture.api.dispose();
+      const retained = WorkflowRun.parse(await fixture.getStorage(`workflows/runs/${started.id}`));
+      expect(retained.status).toBe("interrupted");
+      expect(retained.attention?.interruption).toBe(1);
+      expect(retained.attention?.deliveredInterruption).toBe(0);
+      expect(fixture.deliveries).toHaveLength(delivered);
+      reopened = fixture.reopen();
+      const recovered = await reopened.get(fixture.ownerID, started.id);
+      expect(recovered.attention?.deliveredInterruption).toBe(1);
+      expect(fixture.deliveries).toHaveLength(delivered + 1);
+      await reopened.get(fixture.ownerID, started.id);
+      expect(fixture.deliveries).toHaveLength(delivered + 1);
+    } finally { await reopened?.dispose(); await fixture.api.dispose(); }
+  });
+
+  test("owner liveness: distinct repeated interruptions do not duplicate checkpoint notices", async () => {
+    const fixture = await harness("valid");
+    let reopened: ReturnType<typeof workflowEngine> | undefined;
+    try {
+      const started = await fixture.api.start(fixture.ownerID, WorkflowStart.parse({ key: "repeat-notice",
+        script: `export const meta = { name: "repeat", description: "repeat" }; return await checkpoint("Approval?", { key: "approve" });`,
+      }), { agent: "caller", model: { providerID: "test", id: "model" } });
+      await reaches(fixture.api, fixture.ownerID, started.id, "waiting");
+      await fixture.api.dispose();
+      reopened = fixture.reopen();
+      await reopened.control(fixture.ownerID, { runID: started.id, action: "resume" });
+      await reaches(reopened, fixture.ownerID, started.id, "waiting");
+      await reopened.dispose();
+      const retained = WorkflowRun.parse(await fixture.getStorage(`workflows/runs/${started.id}`));
+      expect(retained.attention?.interruption).toBe(2);
+      expect(retained.attention?.deliveredInterruption).toBe(1);
+      reopened = fixture.reopen();
+      const run = await reopened.get(fixture.ownerID, started.id);
+      expect(run.attention).toEqual({ checkpoints: ["approve"], interruption: 2, deliveredInterruption: 2 });
+      const interruptions = fixture.deliveries.filter((_, index) => /interrupted:/.test(fixture.deliveryTexts[index]));
+      expect(interruptions).toHaveLength(2);
+      expect(new Set(interruptions).size).toBe(2);
+      expect(fixture.deliveryTexts.filter((text) => /checkpoint requires/.test(text))).toHaveLength(1);
+      expect(run.checkpoints[0].response).toBeUndefined();
+      expect(run.result).toBeUndefined();
+      expect(fixture.spawns()).toBe(0);
+    } finally { await reopened?.dispose(); await fixture.api.dispose(); }
+  });
+
+  test("owner liveness: already answered checkpoint has no pending notice on recovery", async () => {
+    const fixture = await harness("valid");
+    let reopened: ReturnType<typeof workflowEngine> | undefined;
+    try {
+      const started = await fixture.api.start(fixture.ownerID, WorkflowStart.parse({ key: "answered-notice",
+        script: `export const meta = { name: "answered", description: "answered" }; return await checkpoint("Approval?", { key: "approve" });`,
+      }), { agent: "caller", model: { providerID: "test", id: "model" } });
+      await reaches(fixture.api, fixture.ownerID, started.id, "waiting");
+      await fixture.api.dispose();
+      await fixture.mutateRun(started.id, (run) => {
+        delete run.attention;
+        run.checkpoints[0].response = false;
+        run.settlements = [{ kind: "checkpoint", key: "approve", response: false }];
+      });
+      fixture.deliveries.length = 0;
+      fixture.deliveryTexts.length = 0;
+      reopened = fixture.reopen();
+      const run = await reopened.get(fixture.ownerID, started.id);
+      expect(run.checkpoints[0].response).toBe(false);
+      expect(fixture.deliveryTexts).toHaveLength(1);
+      expect(fixture.deliveryTexts[0]).toContain("interrupted:");
+      expect(fixture.deliveryTexts[0]).not.toContain("Checkpoint");
+      await reopened.control(fixture.ownerID, { runID: started.id, action: "resume" });
+      expect((await settled(reopened, fixture.ownerID, started.id)).result).toBe(false);
+      expect(fixture.deliveryTexts.some((text) => /checkpoint requires/.test(text))).toBe(false);
+    } finally { await reopened?.dispose(); await fixture.api.dispose(); }
+  });
+
   test("journals before dispatch, accepts schema-valid repair, and caches an exact completed key", async () => {
     const fixture = await harness("repair");
     const started = await fixture.api.start(fixture.ownerID, WorkflowStart.parse({ key: "one", script, args: null }), {
@@ -352,6 +593,51 @@ describe("durable workflow engine", () => {
     await fixture.api.dispose();
   });
 
+  test("persisted helper policy survives restart and nested saved replay; omitted records stay legacy", async () => {
+    for (const legacy of [false, true]) {
+      const fixture = await harness("valid");
+      const child = `export const meta = { name: "child", description: "helper policy replay" };
+        let retries = 0;
+        let gates = 0;
+        try { await retry((index) => { retries = index; if (index < 6) throw new Error("again"); return index; }); } catch (error) {}
+        try { await gate((index) => { gates = index; return index; }, (value) => value === 6); } catch (error) {}
+        let rounds = 0;
+        const found = await loopUntilDry({key:"id", round:(index) => { rounds = index; return index <= 12 ? [{id:index}] : []; }});
+        await checkpoint("Continue?", {key:"approval"});
+        return { retries, gates, rounds, found:found.length };`;
+      fixture.setSaved("child", child);
+      fixture.setSaved("parent", `export const meta = { name: "parent", description: "saved policy" };
+        let parentRetries = 0;
+        try { await retry((index) => { parentRetries = index; if (index < 6) throw new Error("again"); return index; }); } catch (error) {}
+        return {parentRetries, child:await workflow("child")};`);
+      const started = await fixture.api.start(fixture.ownerID, WorkflowStart.parse({key:"helper-replay", name:"parent", args:null}), {
+        agent:"caller", model:{providerID:"test", id:"model"},
+      });
+      expect(started.helperPolicy).toBe("optional-counts");
+      await reaches(fixture.api, fixture.ownerID, started.id, "waiting");
+      await fixture.api.dispose();
+      const key = `workflows/runs/${started.id}`;
+      const persisted = JSON.parse(await Bun.file(fixture.file).text())[key];
+      expect(persisted.helperPolicy).toBe("optional-counts");
+      if (legacy) {
+        delete persisted.helperPolicy;
+        await fixture.setStorage(key, persisted);
+      }
+      fixture.setSaved("child", `export const meta = { name: "changed", description: "must stay pinned" }; throw new Error("unpinned child");`);
+      const reopened = fixture.reopen();
+      try {
+        expect((await reopened.get(fixture.ownerID, started.id)).helperPolicy).toBe(legacy ? "legacy-bounded" : "optional-counts");
+        await reopened.control(fixture.ownerID, {runID:started.id, action:"resume", checkpointKey:"workflow:child:0/approval", response:true});
+        const completed = await settled(reopened, fixture.ownerID, started.id);
+        expect(completed.status).toBe("completed");
+        expect(completed.result).toEqual(legacy
+          ? {parentRetries:3, child:{retries:3, gates:3, rounds:10, found:10}}
+          : {parentRetries:6, child:{retries:6, gates:6, rounds:14, found:12}});
+        expect(JSON.parse(await Bun.file(fixture.file).text())[key].helperPolicy).toBe(legacy ? "legacy-bounded" : "optional-counts");
+      } finally { await reopened.dispose(); }
+    }
+  });
+
   test("persists a checkpoint, interrupts on engine disposal, and resumes only after an explicit response", async () => {
     const fixture = await harness("valid");
     const checkpointScript = `
@@ -369,6 +655,148 @@ return await checkpoint("Continue?", { key: "approval" });`;
     expect(run.status).toBe("completed");
     expect(run.result).toEqual({ approved: true });
     expect(run.checkpoints).toEqual([{ key: "approval", prompt: "Continue?", response: { approved: true } }]);
+    await reopened.dispose();
+  });
+
+  test("omitted budgets allow more than four steps and 132 host calls, including exact retry", async () => {
+    const fixture = await harness("valid");
+    const input = WorkflowStart.parse({ key: "unbounded", script: `
+export const meta = { name: "unbounded", description: "optional budgets" };
+for (let i = 0; i < 140; i++) await log("call-" + i);
+for (let i = 0; i < 6; i++) await agent("check", { key: "step-" + i, agent: "analyst" });
+return true;` });
+    const runtime = { agent: "caller", model: { providerID: "test", id: "model" } };
+    try {
+      const started = await fixture.api.start(fixture.ownerID, input, runtime);
+      const run = await settled(fixture.api, fixture.ownerID, started.id);
+      expect(run.status).toBe("completed");
+      expect(run.steps).toHaveLength(6);
+      expect(run.logs).toHaveLength(140);
+      expect(run.limits).toEqual({ concurrency: 3, maxAgents: null, agentTimeoutMs: null, timeoutMs: null });
+      expect((await fixture.api.start(fixture.ownerID, input, runtime)).id).toBe(run.id);
+      expect(fixture.spawns()).toBe(6);
+    } finally { await fixture.api.dispose(); }
+  });
+
+  test("saved nested unbounded execution remains unbounded after disposal and resume", async () => {
+    const fixture = await harness("valid");
+    fixture.setSaved("child", `export const meta = { name: "child", description: "unbounded child" };
+for (let i = 0; i < 140; i++) await log("child-" + i);
+for (let i = 0; i < 6; i++) await agent("check", { key: "step-" + i, agent: "analyst" });
+return true;`);
+    fixture.setSaved("parent", `export const meta = { name: "parent", description: "saved parent" };
+await checkpoint("Continue?", { key: "continue" }); return await workflow("child");`);
+    const started = await fixture.api.start(fixture.ownerID, WorkflowStart.parse({ key: "nested-unbounded", name: "parent" }), {
+      agent: "caller", model: { providerID: "test", id: "model" },
+    });
+    await reaches(fixture.api, fixture.ownerID, started.id, "waiting");
+    await fixture.api.dispose();
+    const reopened = fixture.reopen();
+    try {
+      await reopened.control(fixture.ownerID, { runID: started.id, action: "resume", checkpointKey: "continue", response: true });
+      const run = await settled(reopened, fixture.ownerID, started.id);
+      expect(run.status).toBe("completed");
+      expect(run.steps).toHaveLength(6);
+      expect(run.limits.maxAgents).toBeNull();
+      expect(run.limits.timeoutMs).toBeNull();
+      expect(run.limits.agentTimeoutMs).toBeNull();
+    } finally { await reopened.dispose(); }
+  });
+
+  test("resuming a compacted legacy record enforces its omitted four-step cap", async () => {
+    const fixture = await harness("valid");
+    const started = await fixture.api.start(fixture.ownerID, WorkflowStart.parse({ key: "legacy-cap", script: `
+export const meta = { name: "legacy", description: "legacy cap" };
+await checkpoint("Continue?", { key: "continue" });
+for (let i = 0; i < 6; i++) await agent("check", { key: "step-" + i, agent: "analyst" });
+return true;` }), { agent: "caller", model: { providerID: "test", id: "model" } });
+    await reaches(fixture.api, fixture.ownerID, started.id, "waiting");
+    await fixture.api.dispose();
+    const key = `workflows/runs/${started.id}`;
+    const legacy = WorkflowRun.parse(await fixture.getStorage(key));
+    await fixture.setStorage(key, { ...legacy, limits: {} });
+    const reopened = fixture.reopen();
+    try {
+      await reopened.control(fixture.ownerID, { runID: started.id, action: "resume", checkpointKey: "continue", response: true });
+      const run = await settled(reopened, fixture.ownerID, started.id);
+      expect(run.status).toBe("failed");
+      expect(run.error).toContain("agent limit reached (4)");
+      expect(run.steps).toHaveLength(4);
+      expect(run.limits).toEqual({ concurrency: 3, maxAgents: 4, agentTimeoutMs: 1_800_000, timeoutMs: 86_400_000 });
+    } finally { await reopened.dispose(); }
+  });
+
+  test("unbounded running agents allocate no budget deadline and stop still interrupts them", async () => {
+    const fixture = await harness("manual");
+    const schedule = spyOn(globalThis, "setTimeout");
+    try {
+      const started = await fixture.api.start(fixture.ownerID, WorkflowStart.parse({ key: "no-timers", script }), {
+        agent: "caller", model: { providerID: "test", id: "model" },
+      });
+      for (let count = 0; count < 200 && fixture.spawns() === 0; count++) await Bun.sleep(5);
+      expect(fixture.spawns()).toBe(1);
+      await Bun.sleep(20);
+      expect(schedule.mock.calls.filter(([, delay]) => delay !== undefined && delay > 1_000)).toEqual([]);
+      const stopped = await fixture.api.control(fixture.ownerID, { runID: started.id, action: "stop" });
+      expect(stopped.status).toBe("stopped");
+      expect(fixture.workerEvents).toContain("interrupt-end");
+    } finally { schedule.mockRestore(); await fixture.api.dispose(); }
+  });
+
+  test("an explicit whole-run deadline still fails a blocked unbounded-step run", async () => {
+    const fixture = await harness("manual");
+    try {
+      const started = await fixture.api.start(fixture.ownerID, WorkflowStart.parse({ key: "run-deadline", script, timeoutMs: 1_000 }), {
+        agent: "caller", model: { providerID: "test", id: "model" },
+      });
+      const run = await settled(fixture.api, fixture.ownerID, started.id);
+      expect(run.status).toBe("failed");
+      expect(run.error).toContain("timeout");
+      expect(run.limits.maxAgents).toBeNull();
+      expect(fixture.workerEvents).toContain("interrupt-end");
+    } finally { await fixture.api.dispose(); }
+  });
+
+  test("expired omitted legacy workflow deadlines still fail on resume", async () => {
+    const fixture = await harness("valid");
+    const started = await fixture.api.start(fixture.ownerID, WorkflowStart.parse({ key: "legacy-timeout", script: `
+export const meta = { name: "legacy", description: "legacy deadline" };
+return await checkpoint("Continue?", { key: "continue" });` }), {
+      agent: "caller", model: { providerID: "test", id: "model" },
+    });
+    await reaches(fixture.api, fixture.ownerID, started.id, "waiting");
+    await fixture.api.dispose();
+    const key = `workflows/runs/${started.id}`;
+    const legacy = WorkflowRun.parse(await fixture.getStorage(key));
+    await fixture.setStorage(key, { ...legacy, limits: {}, created: Date.now() - 86_400_001 });
+    const reopened = fixture.reopen();
+    try {
+      await reopened.control(fixture.ownerID, { runID: started.id, action: "resume", checkpointKey: "continue", response: true });
+      const run = await settled(reopened, fixture.ownerID, started.id);
+      expect(run.status).toBe("failed");
+      expect(run.error).toBe("Workflow timeout exceeded");
+    } finally { await reopened.dispose(); }
+  });
+
+  test("preserves explicit checkpoint reviewer through nested workflow replay and rejects reviewer identity changes", async () => {
+    const fixture = await harness("valid");
+    fixture.setSaved("review", `export const meta = { name: "review", description: "review" }; return await checkpoint("Review", { key: "approval", reviewer: "coordinator" });`);
+    const started = await fixture.api.start(fixture.ownerID, WorkflowStart.parse({ key: "reviewer", script: `export const meta = { name: "reviewer", description: "reviewer" }; return await workflow("review");`, args: null }), {
+      agent: "caller", model: { providerID: "test", id: "model" },
+    });
+    const waiting = await reaches(fixture.api, fixture.ownerID, started.id, "waiting");
+    expect(waiting.checkpoints[0].reviewer).toBe("coordinator");
+    await fixture.api.dispose();
+    const storageKey = `workflows/runs/${started.id}`;
+    const tampered = WorkflowRun.parse(await fixture.getStorage(storageKey));
+    tampered.checkpoints[0].reviewer = "human";
+    await fixture.setStorage(storageKey, tampered);
+    const reopened = fixture.reopen();
+    await reopened.control(fixture.ownerID, { runID: started.id, action: "resume", checkpointKey: waiting.checkpoints[0].key, response: true });
+    const failed = await settled(reopened, fixture.ownerID, started.id);
+    expect(failed.status).toBe("failed");
+    expect(failed.error).toContain("reviewer changed on resume");
+    expect(failed.checkpoints[0].reviewer).toBe("human");
     await reopened.dispose();
   });
 
@@ -724,9 +1152,10 @@ return [await read, response];`,
     legacy[0].key = "x".repeat(16 * 1024 * 1024 - 100 - Buffer.byteLength(JSON.stringify(legacy)));
     await fixture.setStorage(`workflows/completions/${started.id}`, legacy);
     const runKey = `workflows/runs/${started.id}`;
-    const before = await fixture.getStorage(runKey);
     const reopened = fixture.reopen();
     try {
+      await reopened.get(fixture.ownerID, started.id);
+      const before = await fixture.getStorage(runKey);
       fixture.writes.length = 0;
       await expect(reopened.control(fixture.ownerID, {
         runID: started.id, action: "resume", checkpointKey: "continue", response: "x".repeat(200),
@@ -854,6 +1283,7 @@ return await checkpoint("Continue?", { key: "continue" });`;
     await reopened.control(fixture.ownerID, { runID: started.id, action: "resume" });
     const interrupted = await reaches(reopened, fixture.ownerID, started.id, "interrupted");
     expect(interrupted.error).toContain("same worker");
+    expect(interrupted.interruption).toBeUndefined();
     fixture.setOutcome("inspect", "succeeded");
     await reopened.control(fixture.ownerID, { runID: started.id, action: "resume" });
     expect((await settled(reopened, fixture.ownerID, started.id)).status).toBe("completed");
@@ -1001,6 +1431,7 @@ return await parallel(Array.from({ length: 8 }, (_, index) => () => agent("Read"
     const legacyKey = `workflows/completions/${started.id}`;
     const full = JSON.parse(JSON.stringify(await fixture.getStorage(runKey)));
     delete full.settlements;
+    delete full.interruption;
     delete full.error;
     full.limits.timeoutMs = 604_800_000;
     full.args = "";
@@ -1415,11 +1846,16 @@ return await agent("read", { key: "read", agent: "analyst" });`;
     const workerID = fixture.workerID("read");
     await expect(fixture.api.prepareContext(workerID)).resolves.toBeUndefined();
     await fixture.api.dispose();
+    fixture.setRestartNotice(workerID);
+    await fixture.mutateRun(started.id, (run) => { run.status = "running"; delete run.interruption; });
     const reopened = fixture.reopen();
     await expect(reopened.prepareContext(workerID)).rejects.toThrow("explicitly resumed");
+    expect(fixture.deliveryTexts.some((text) => text.includes(started.id) && text.includes("read") && text.includes(workerID) && text.includes("running") && text.includes("workflows_control"))).toBe(true);
     authorizeWorkflowExecution(workerID);
     await expect(reopened.prepareContext(workerID)).resolves.toBeUndefined();
     expect((await reopened.get(fixture.ownerID, started.id)).status).toBe("interrupted");
+    expect((await reopened.get(fixture.ownerID, started.id)).interruption?.kind).toBe("lease-lost");
+    expect(fixture.spawns()).toBe(1);
     await reopened.dispose();
   });
 
@@ -1471,33 +1907,36 @@ return await agent("read", { key: "read", agent: "analyst" });`;
 
   test("paused queued work releases the owner permit for another run", async () => {
     const fixture = await harness("manual", 1);
-    const parallel = `
+    try {
+      const parallel = `
 export const meta = { name: "permit-a", description: "paused queue" };
 return await parallel([
   () => agent("a", { key: "a", agent: "analyst" }),
   () => agent("b", { key: "b", agent: "analyst" })
 ]);`;
-    const first = await fixture.api.start(fixture.ownerID, WorkflowStart.parse({ key: "permit-a", script: parallel, args: null, concurrency: 1 }), {
-      agent: "caller", model: { providerID: "test", id: "model" },
-    });
-    while (fixture.spawnedStepKeys.length < 1) await Bun.sleep(2);
-    const activeKey = fixture.spawnedStepKeys[0];
-    await fixture.api.control(fixture.ownerID, { runID: first.id, action: "pause" });
-    await fixture.complete(activeKey);
-    await reaches(fixture.api, fixture.ownerID, first.id, "paused");
+      const first = await fixture.api.start(fixture.ownerID, WorkflowStart.parse({ key: "permit-a", script: parallel, args: null, concurrency: 1 }), {
+        agent: "caller", model: { providerID: "test", id: "model" },
+      });
+      while (fixture.spawnedStepKeys.length < 1) await Bun.sleep(2);
+      const activeKey = fixture.spawnedStepKeys[0];
+      await fixture.api.control(fixture.ownerID, { runID: first.id, action: "pause" });
+      await fixture.complete(activeKey);
+      await reaches(fixture.api, fixture.ownerID, first.id, "paused");
 
-    const secondScript = `
+      const secondScript = `
 export const meta = { name: "permit-b", description: "other run" };
 return await agent("c", { key: "c", agent: "analyst" });`;
-    const second = await fixture.api.start(fixture.ownerID, WorkflowStart.parse({ key: "permit-b", script: secondScript, args: null }), {
-      agent: "caller", model: { providerID: "test", id: "model" },
-    });
-    for (let count = 0; count < 100 && !fixture.spawnedStepKeys.includes("c"); count++) await Bun.sleep(2);
-    expect(fixture.spawnedStepKeys).toContain("c");
-    await fixture.complete("c");
-    expect((await settled(fixture.api, fixture.ownerID, second.id)).status).toBe("completed");
-    await fixture.api.control(fixture.ownerID, { runID: first.id, action: "stop" });
-    await fixture.api.dispose();
+      const second = await fixture.api.start(fixture.ownerID, WorkflowStart.parse({ key: "permit-b", script: secondScript, args: null }), {
+        agent: "caller", model: { providerID: "test", id: "model" },
+      });
+      await fixture.waitForSpawn("c");
+      expect(fixture.spawnedStepKeys).toContain("c");
+      await fixture.complete("c");
+      expect((await settled(fixture.api, fixture.ownerID, second.id)).status).toBe("completed");
+      await fixture.api.control(fixture.ownerID, { runID: first.id, action: "stop" });
+    } finally {
+      await fixture.api.dispose();
+    }
   });
 
   test("serializes concurrent final delivery attempts", async () => {

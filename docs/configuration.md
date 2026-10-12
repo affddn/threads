@@ -24,7 +24,7 @@ To set options, use an object:
   "plugins": [
     {
       "package": "@op1/threads",
-      "options": { "maxWorkers": 8, "workflowConcurrency": 8, "workflowMaxAgents": 8 }
+      "options": { "maxWorkers": 8, "workflowConcurrency": 8 }
     }
   ]
 }
@@ -38,11 +38,11 @@ Keep your other plugin entries in the list.
 | --- | --- | --- | --- |
 | `maxWorkers` | 4 | 1–32 | Unfinished workers per conversation. Workflow steps owned by that conversation count against the same limit. |
 | `workflowConcurrency` | 3 | 1–8 | Steps that one new workflow runs at the same time. |
-| `workflowMaxAgents` | 4 | 1–1,000 | Total agent steps in one new workflow. |
+| `workflowMaxAgents` | Unset | 1–1,000 when supplied | Optional user-selected total-step budget for new workflows. |
 
 A worker stops counting against `maxWorkers` when it reports, or when its run fails or is interrupted. A worker whose run ends without a report keeps its slot until you deal with it.
 
-Values passed to `workflows_start` override the workflow defaults. Existing runs keep the limits they started with. A run never has more active steps than `maxWorkers` allows. To run eight steps at once, set all three options to at least 8.
+Values passed to `workflows_start` override configured workflow values. Task budgets have no built-in defaults; agents leave them unset unless requested. Existing runs keep the limits they started with. A run never has more active steps than `maxWorkers` allows. To run eight steps at once, set `maxWorkers` and `workflowConcurrency` to at least 8.
 
 ## Terminal plugin
 

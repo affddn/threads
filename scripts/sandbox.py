@@ -137,6 +137,8 @@ class Sandbox:
                 content = response.read()
                 return json.loads(content) if content else None
         except HTTPError as error:
+            if method == "GET" and path == "/api/info" and error.code == 503:
+                return {}
             raise RuntimeError(f"{method} {path}: {error.code} {error.read().decode()}") from error
 
 

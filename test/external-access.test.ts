@@ -10,6 +10,7 @@ import { permissionMatches } from "../src/permissions";
 import { threads, workerIdentity } from "../src/threads";
 import { WorkflowAgentInput, type WorkflowRun } from "../src/workflow-types";
 import { assertGrantedProject, assertWorkerProject, workflowSource } from "../src/workflow-worker";
+import { nativeEvaluate } from "./permission-oracle";
 
 const temporary: string[] = [];
 afterEach(async () => Promise.all(temporary.splice(0).map((path) => rm(path, { recursive: true, force: true }))));
@@ -176,7 +177,8 @@ describe("worker project scope", () => {
 
 type Rule = Permission.Rule;
 const decide = (rules: readonly Rule[], action: string, resource: string) =>
-  rules.findLast((rule) => permissionMatches(rule.action, action) && permissionMatches(rule.resource, resource))?.effect ?? "ask";
+  nativeEvaluate ? nativeEvaluate(action, resource, [...rules]).effect :
+    rules.findLast((rule) => permissionMatches(rule.action, action) && permissionMatches(rule.resource, resource))?.effect ?? "ask";
 const defaults: Rule[] = [
   { action: "*", resource: "*", effect: "allow" },
   { action: "external_directory", resource: "*", effect: "ask" },
@@ -272,6 +274,34 @@ async function fakeThreads(options: { coordinatorPermissions?: Rule[]; profiles?
 }
 
 describe("managed workers with grants", () => {
+  (nativeEvaluate ? test : test.skip)("native oracle evaluates the actual spawn and spawnWorkflow permission outputs", async () => {
+    const scoped: Rule[] = [
+      { action: "external_directory", resource: "*", effect: "ask" },
+      { action: "read", resource: "*.env", effect: "ask" },
+      { action: "read", resource: "*.env.*", effect: "deny" },
+      { action: "read", resource: "*.env.example", effect: "allow" },
+    ];
+    const fixture = await fakeThreads({ coordinatorPermissions: scoped });
+    fixture.profiles.reader = [
+      { action: "*", resource: "*", effect: "deny" },
+      { action: "read", resource: "*", effect: "allow" },
+      { action: "external_directory", resource: `${fixture.refs}/*`, effect: "allow" },
+    ];
+    const request = { title: "Order", directory: fixture.worker, task: "Read", agent: "reader" };
+    await fixture.api.spawn(fixture.coordinatorID, { ...request, key: "managed-order" }, fixture.runtime);
+    for (const access of ["read", "write"] as const) await fixture.api.spawnWorkflow(fixture.coordinatorID, { ...request, key: `workflow:wfr_order:${access}` }, fixture.runtime,
+      { ownerID: fixture.coordinatorID, runID: "wfr_order", stepKey: access, callerAgent: "build", access, granted: false, isolation: "shared" });
+    for (const [index, created] of fixture.created.entries()) {
+      const session = fixture.sessions.get(created.id)!;
+      const effective = [...fixture.profiles.reader, ...session.permissions];
+      expect(decide(effective, "read", `${fixture.project}/.env.example`)).toBe("allow");
+      for (const suffix of [".env", ".env.production"]) expect(decide(effective, "read", `${fixture.project}/${suffix}`)).toBe("deny");
+      for (const action of ["shell", "edit", "mcp_test", "subagent"]) expect(decide(effective, action, "anything")).toBe("deny");
+      expect(decide(effective, "external_directory", `${fixture.refs}/file`)).toBe(index === 1 ? "allow" : "ask");
+      expect(decide(effective, "external_directory", `${fixture.other}/file`)).toBe("deny");
+    }
+  });
+
   test("threads_spawn records resolved grants, allows the subtree, and keeps other directories on demand", async () => {
     const fixture = await fakeThreads({ coordinatorPermissions: [{ action: "external_directory", resource: "*", effect: "ask" }] });
     const request = { key: "granted", title: "Granted", directory: fixture.worker, task: "Read refs", agent: "writer", paths: [fixture.link] };
@@ -418,6 +448,35 @@ describe("workflow workers at their destination", () => {
     expect(fixture.events).toEqual([`interrupt ${workerID}`]);
     expect(fixture.prompts).toEqual([]);
     expect(fixture.sessions.get(workerID)!.location.directory).toBe(fixture.source);
+  });
+
+  (nativeEvaluate ? test : test.skip)("native oracle: reservation refresh keeps destination role exceptions ordered and current caller denials authoritative", async () => {
+    const fixture = await relocation({ coordinatorPermissions: [{ action: "external_directory", resource: "*", effect: "ask" }] });
+    const broad: Rule = { action: "external_directory", resource: `${fixture.refs}/*`, effect: "deny" };
+    const exception: Rule = { action: "external_directory", resource: `${fixture.refs}/public/*`, effect: "allow" };
+    fixture.profiles.writer = [
+      { action: "*", resource: "*", effect: "deny" },
+      { action: "read", resource: "*", effect: "allow" },
+      { action: "external_directory", resource: `${fixture.refs}/*`, effect: "allow" },
+    ];
+    fixture.layer([broad, exception]);
+    await fixture.reserve("ordered-refresh");
+    const workerID = fixture.workerID("ordered-refresh");
+    const reservation = fixture.sessions.get(workerID)!.permissions;
+    expect(decide([...fixture.profiles.writer, ...reservation], "external_directory", `${fixture.refs}/private/a`)).toBe("ask");
+    fixture.setCoordinatorPermissions([
+      { action: "external_directory", resource: "*", effect: "ask" },
+      { action: "external_directory", resource: `${fixture.refs}/public/blocked/*`, effect: "deny" },
+    ]);
+    await fixture.spawn("ordered-refresh", false);
+    const effective = [...fixture.profiles.writer, broad, exception, ...fixture.sessions.get(workerID)!.permissions];
+    expect(decide(effective, "external_directory", `${fixture.refs}/private/a`)).toBe("deny");
+    expect(decide(effective, "external_directory", `${fixture.refs}/public/a`)).toBe("ask");
+    expect(decide(effective, "external_directory", `${fixture.refs}/public/blocked/a`)).toBe("deny");
+    for (const action of ["shell", "edit", "mcp_test", "subagent"]) expect(decide(effective, action, "anything")).toBe("deny");
+    expect(fixture.events).toEqual([
+      `move ${workerID} ${fixture.checkout}`, `agent ${workerID} writer`, `update ${workerID}`, `prompt ${workerID}`,
+    ]);
   });
 
   test("a reservation gets its permissions from the role at its checkout and the coordinator's current rules before its first prompt", async () => {

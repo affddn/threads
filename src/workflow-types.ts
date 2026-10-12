@@ -14,12 +14,16 @@ export const WorkflowModel = z.object({
 });
 export const WorkflowLimits = z.object({
   concurrency: z.number().int().min(1).max(8).default(3),
-  maxAgents: z.number().int().min(1).max(1000).default(4),
-  agentTimeoutMs: z.number().int().min(1000).max(604800000).default(1800000),
-  timeoutMs: z.number().int().min(1000).max(604800000).default(86400000),
-  tokenBudget: z.number().int().positive().optional(),
+  // Old journals compacted these finite defaults; null explicitly means unbounded.
+  maxAgents: z.number().int().min(1).max(1000).nullable().default(4),
+  agentTimeoutMs: z.number().int().min(1000).max(604800000).nullable().default(1800000),
+  timeoutMs: z.number().int().min(1000).max(604800000).nullable().default(86400000),
+  tokenBudget: z.number().int().positive().nullable().optional(),
 });
 export const WorkflowStart = WorkflowLimits.extend({
+  maxAgents: WorkflowLimits.shape.maxAgents.default(null),
+  agentTimeoutMs: WorkflowLimits.shape.agentTimeoutMs.default(null),
+  timeoutMs: WorkflowLimits.shape.timeoutMs.default(null),
   key: z.string().min(1).max(120),
   script: z.string().min(1).max(200000).optional(),
   name: z.string().regex(/^[a-zA-Z0-9][a-zA-Z0-9_-]{0,79}$/).optional(),
@@ -87,6 +91,7 @@ export type WorkflowStep = z.infer<typeof WorkflowStep>;
 export const WorkflowCheckpoint = z.object({
   key: z.string(),
   prompt: z.string(),
+  reviewer: z.enum(["human", "coordinator"]).optional(),
   response: Json.optional(),
 });
 export const WorkflowSettlement = z.discriminatedUnion("kind", [
@@ -96,6 +101,7 @@ export const WorkflowSettlement = z.discriminatedUnion("kind", [
 export type WorkflowSettlement = z.infer<typeof WorkflowSettlement>;
 export const WorkflowRun = z.object({
   version: z.literal(1),
+  helperPolicy: z.enum(["legacy-bounded", "optional-counts"]).default("legacy-bounded"),
   id: z.string(),
   key: z.string(),
   ownerID: z.string(),
@@ -110,6 +116,11 @@ export const WorkflowRun = z.object({
   fingerprint: z.string(),
   limits: WorkflowLimits,
   status: z.enum(["running", "pausing", "paused", "stopping", "stopped", "waiting", "interrupted", "failed", "completed"]),
+  interruption: z.object({
+    kind: z.enum(["engine-disposed", "lease-lost"]),
+    priorStatus: z.enum(["running", "waiting"]),
+    at: z.number().finite().nonnegative(),
+  }).optional(),
   created: z.number(),
   updated: z.number(),
   phase: z.string(),
@@ -117,13 +128,18 @@ export const WorkflowRun = z.object({
   logs: z.array(z.object({ time: z.number(), text: z.string() })),
   checkpoints: z.array(WorkflowCheckpoint),
   settlements: z.array(WorkflowSettlement).optional(),
+  attention: z.object({
+    checkpoints: z.array(z.string()),
+    interruption: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
+    deliveredInterruption: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
+  }).optional(),
   result: Json.optional(),
   error: z.string().optional(),
   deliveryID: z.string(),
   delivered: z.boolean(),
 });
 export type WorkflowRun = z.infer<typeof WorkflowRun>;
-export const WorkflowSummary = WorkflowRun.omit({ script: true, args: true, result: true, steps: true, logs: true, checkpoints: true, settlements: true, fingerprint: true, callerAgent: true, deliveryID: true, delivered: true }).extend({
+export const WorkflowSummary = WorkflowRun.omit({ script: true, args: true, result: true, steps: true, logs: true, checkpoints: true, settlements: true, attention: true, fingerprint: true, callerAgent: true, deliveryID: true, delivered: true }).extend({
   counts: z.object({ completed: z.number(), running: z.number(), failed: z.number(), total: z.number() }),
   usage: WorkflowUsage,
 });

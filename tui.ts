@@ -8,6 +8,7 @@ import { workflowUI } from "./src/workflow-ui";
 import { reportedTabAction } from "./src/activity-model";
 import { workInProgress } from "./src/idle";
 import { RGBA } from "@opentui/core";
+import { uiErrorMessage, uiState } from "./src/ui-location";
 
 const CoordinatorRef = z.object({ coordinatorID: z.string() });
 
@@ -62,15 +63,15 @@ export default Plugin.define({
       try {
         const coordinatorIDs = trackedCoordinatorIDs();
         if (!coordinatorIDs.length) return;
-        const { workers } = await rpc.snapshot(
+        const { workers } = await uiState(ctx, coordinatorIDs, (location) => rpc.snapshot(
           { coordinatorIDs },
           {
-            location: ctx.location ?? ctx.data.location.default(),
+            location,
             signal: abort.signal,
           },
-        );
+        ));
         known = workers.map((worker) => worker.workerID);
-        list.updateWorkers(workers);
+        list.updateWorkers(workers, coordinatorIDs);
         for (const worker of workers) {
           if (stopped) return;
           if (list.isDismissed(worker.workerID)) continue;
@@ -105,7 +106,7 @@ export default Plugin.define({
         }
         lastError = undefined;
       } catch (error) {
-        const message = `Managed worker tabs: ${String(error)}`;
+        const message = `Managed worker tabs: ${uiErrorMessage(error)}`;
         if (!stopped && message !== lastError)
           ctx.ui.toast.show({ message, variant: "error" });
         lastError = message;
@@ -123,13 +124,13 @@ export default Plugin.define({
       try {
         const ids = trackedCoordinatorIDs();
         if (ids.length) {
-          const { workers } = await rpc.restore(
+          const { workers } = await uiState(ctx, ids, (location) => rpc.restore(
             { coordinatorIDs: ids },
             {
-              location: ctx.location ?? ctx.data.location.default(),
+              location,
               signal: abort.signal,
             },
-          );
+          ));
           if (stopped) return;
           known = [...new Set([...known, ...workers.map((worker) => worker.workerID)])];
           await list.restore(workers.map((worker) => worker.workerID));
@@ -138,7 +139,7 @@ export default Plugin.define({
       } catch (error) {
         if (!stopped)
           ctx.ui.toast.show({
-            message: `Managed workers: ${String(error)}`,
+            message: `Managed workers: ${uiErrorMessage(error)}`,
             variant: "error",
           });
       }

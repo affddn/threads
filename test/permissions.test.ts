@@ -99,13 +99,20 @@ describe("workflow worker permissions", () => {
     expect(decide(readProfile, read([...inherited, { action: "external_directory", resource: allowed, effect: "deny" }]), ...ext(allowed))).toBe("deny");
   });
 
-  test("grant-free read workers and write workers without an external ask keep the 0.2.4 rules", () => {
+  test("grant-free policies keep ordinary boundaries while fixing ordered read exceptions", () => {
     const inherited: Rule[] = [...defaults, { action: "shell", resource: "rm *", effect: "deny" }, { action: "edit", resource: "*.lock", effect: "ask" }];
     for (const role of [permissive, readOnly, []]) {
-      expect(workflowPermissions(inherited, { access: "read", role })).toEqual(legacyWorkflowPermissions(inherited, role));
+      const session = workflowPermissions(inherited, { access: "read", role });
+      for (const action of ["shell", "edit", "subagent", "mcp_test", "threads_spawn"]) expect(decide(role, session, action, "anything")).toBe("deny");
+      expect(decide(role, session, "read", "/project/.env")).toBe("deny");
+      expect(decide(role, session, "read", "/project/.env.production")).toBe("deny");
+      expect(decide(role, session, "read", "/project/.env.example")).toBe(role.length ? "allow" : "deny");
     }
     const noExternalAsk = inherited.filter((rule) => rule.action !== "external_directory");
-    expect(workflowPermissions(noExternalAsk, { access: "write", role: permissive })).toEqual(legacyWorkflowPermissions(noExternalAsk));
+    const session = workflowPermissions(noExternalAsk, { access: "write", role: permissive });
+    expect(decide(permissive, session, "shell", "rm file")).toBe("deny");
+    expect(decide(permissive, session, "edit", "bun.lock")).toBe("deny");
+    expect(decide(permissive, session, "read", "/project/.env.example")).toBe("allow");
   });
 
   test("an inherited external_directory ask stays an ask while other inherited asks become denies", () => {
@@ -148,8 +155,7 @@ describe("workflow worker permissions", () => {
     expect(decide(explicit, explicitSession, ...ext("/secret/*"))).toBe("deny");
     expect(decide(explicit, explicitSession, ...ext("/other/*"))).toBe("ask");
     expect(decide(readOnly, workerRestrictions(defaults, readOnly), ...ext("/other/*"))).toBe("deny");
-    expect(workerRestrictions([{ action: "shell", resource: "*", effect: "ask" }], readOnly))
-      .toEqual([{ action: "shell", resource: "*", effect: "deny" }]);
+    expect(decide(readOnly, workerRestrictions([{ action: "shell", resource: "*", effect: "ask" }], readOnly), "shell", "ls")).toBe("deny");
   });
 });
 

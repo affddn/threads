@@ -98,6 +98,8 @@ threads_send({ workerID: "ses_...", key: "use-staging", text: "Test against stag
 
 Use a new `key` for each message. Keep follow-ups within the original task. For new work, start a new worker.
 
+When the follow-up finishes, inspect its completion notice and the worker's evidence. The notice identifies your message and its native execution outcome. The original report stays unchanged.
+
 ## Stop or hide a worker
 
 - `threads_interrupt` stops the worker's current run. The conversation stays.

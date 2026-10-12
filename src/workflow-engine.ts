@@ -178,7 +178,26 @@ export function workflowEngine(
       }
     });
   }
-  const store = workflowStore(ctx.storage, { onDiagnostic: diagnose });
+  const journal = workflowStore(ctx.storage, { onDiagnostic: diagnose });
+  const store = {
+    ...journal,
+    update(id: string, update: (run: WorkflowRun) => void, kind: "payload" | "control" = "payload", lifecycle?: "engine-disposed" | "lease-lost") {
+      return journal.update(id, (run) => {
+        const previous = run.status;
+        const previousError = run.error;
+        update(run);
+        if (lifecycle && run.status === "interrupted" && (previous === "running" || previous === "waiting")) {
+          run.interruption = { kind: lifecycle, priorStatus: previous, at: Date.now() };
+        } else if (run.status !== "interrupted" || previous !== "interrupted" || run.error !== previousError) {
+          delete run.interruption;
+        }
+        if (run.status === "interrupted" && previous !== "interrupted") {
+          run.attention ??= { checkpoints: [], interruption: 0, deliveredInterruption: 0 };
+          run.attention.interruption++;
+        }
+      }, kind);
+    },
+  };
   const maxWorkers = options.maxWorkers ?? 4;
   if (!Number.isSafeInteger(maxWorkers) || maxWorkers < 1) throw new Error("maxWorkers must be a positive integer");
   const ajv = new Ajv({ allErrors: true, strict: false });
@@ -250,10 +269,14 @@ export function workflowEngine(
               }, "control");
               continue;
             }
+            if (run.status === "pausing") {
+              await store.update(run.id, (current) => { current.status = "paused"; }, "control");
+              continue;
+            }
             await store.update(run.id, (current) => {
               current.status = "interrupted";
               current.error = "OpenCode stopped while this workflow was active. Inspect its recorded steps, then resume explicitly.";
-            }, "control");
+            }, "control", "lease-lost");
           } catch (error) {
             await diagnose({ id: run.id, ownerID, message: errorText(error) });
           }
@@ -261,10 +284,57 @@ export function workflowEngine(
       }
     }
     for (const run of await store.list(ownerID)) {
+      await attend(run.id);
       if (terminal.has(run.status) && !run.delivered) {
         await deliver(run.id).catch((error) => diagnose({ id: run.id, ownerID, message: errorText(error) }));
       }
     }
+  }
+
+  async function attend(runID: string) {
+    // One durable receipt per checkpoint and one counter pair for all interruptions.
+    // Retry only at a boundary or inspection, never from the checkpoint wait loop.
+    await serialized(`workflow-attention:${runID}`, async () => {
+      if (disposed) return;
+      let run = await store.get(runID);
+      if (run.status !== "waiting" && run.status !== "interrupted") return;
+      if (run.status === "interrupted" && !run.attention?.interruption) {
+        run = await store.update(runID, (current) => {
+          current.attention ??= { checkpoints: [], interruption: 0, deliveredInterruption: 0 };
+          current.attention.interruption ||= 1;
+        }, "control");
+      }
+      const unanswered = run.checkpoints.filter((checkpoint) => checkpoint.response === undefined &&
+        !run.settlements?.some((entry) => entry.kind === "checkpoint" && entry.key === checkpoint.key));
+      const interruption = run.attention?.interruption ?? 0;
+      const interrupted = run.status === "interrupted";
+      if (interrupted && run.attention?.deliveredInterruption === interruption) return;
+      const pending = interrupted ? unanswered : unanswered.filter((checkpoint) => !run.attention?.checkpoints.includes(checkpoint.key));
+      if (!interrupted && pending.length === 0) return;
+      const notices = interrupted ? [{ kind: "interruption", key: String(interruption), checkpoints: pending }]
+        : pending.map((checkpoint) => ({ kind: "checkpoint", key: checkpoint.key, checkpoints: [checkpoint] }));
+      for (const notice of notices) {
+        const instructions = notice.checkpoints.map((checkpoint) =>
+          `Checkpoint ${JSON.stringify(checkpoint.key)}: ${checkpoint.prompt}\nAfter obtaining an explicit response, use workflows_control with runID ${runID}, action "resume", checkpointKey ${JSON.stringify(checkpoint.key)}, and response containing that response.`).join("\n");
+        await ctx.session.synthetic({
+          sessionID: run.ownerID,
+          id: SessionMessage.ID.make(`msg_${digest(runID, "attention", notice.kind, notice.key).slice(0, 32)}`),
+          text: interrupted
+            ? `Workflow ${run.name} (${runID}) interrupted: ${run.error ?? "Execution stopped."}\n${run.steps.filter((step) => step.status !== "completed").map((step) => `Step ${JSON.stringify(step.key)}: ${step.status}; worker ${step.workerID}; access ${step.input.access}.`).join("\n")}\nInspect this exact run with workflows_inspect before resuming. Do not automatically answer gates, replay writes, or change reports.\n${instructions || `After explicitly resolving the interruption, use workflows_control with runID ${runID} and action "resume".`}`
+            : `Workflow ${run.name} (${runID}) checkpoint requires an explicit response. Do not automatically answer or resume this gate.\n${instructions}`,
+          metadata: { opWorkflowAttention: { runID, kind: notice.kind, key: notice.key } },
+          delivery: "queue", resume: true,
+        });
+        await store.update(runID, (current) => {
+          current.attention ??= { checkpoints: [], interruption: 0, deliveredInterruption: 0 };
+          if (interrupted) current.attention.deliveredInterruption = interruption;
+          else if (!current.attention.checkpoints.includes(notice.key)) current.attention.checkpoints.push(notice.key);
+        }, "control");
+      }
+    }).catch(() => {
+      // Ambiguous delivery retains the same deterministic ID for the next inspection.
+      // Owner notification is not workflow execution failure.
+    });
   }
 
   async function waitUntilRunnable(runID: string, signal: AbortSignal) {
@@ -297,20 +367,21 @@ export function workflowEngine(
 
   async function executeRun(runID: string, runtime: Runtime, controller: AbortController, recovering: boolean) {
     let run = await store.get(runID);
-    const remaining = run.created + run.limits.timeoutMs - Date.now();
-    if (remaining <= 0) {
+    const remaining = run.limits.timeoutMs === null ? undefined : run.created + run.limits.timeoutMs - Date.now();
+    if (remaining !== undefined && remaining <= 0) {
+      await interruptWorkflowWorkers(workers, run.ownerID, run);
       await store.update(runID, (current) => { current.status = "failed"; current.error = "Workflow timeout exceeded"; }, "control");
       await deliver(runID);
       return;
     }
-    const timer = setTimeout(() => controller.abort(new Error("Workflow timeout exceeded")), remaining);
+    const timer = remaining === undefined ? undefined : setTimeout(() => controller.abort(new Error("Workflow timeout exceeded")), remaining);
     const seen = new Set<string>();
     const pendingAgents = new Set<Promise<unknown>>();
-    const maxCalls = run.limits.maxAgents * 8 + 100;
+    const maxCalls = run.limits.maxAgents === null ? undefined : run.limits.maxAgents * 8 + 100;
     let hostCalls = 0;
     const countCall = () => {
       hostCalls++;
-      if (hostCalls > maxCalls) throw new Error(`Workflow cumulative call limit exceeded (${maxCalls})`);
+      if (maxCalls !== undefined && hostCalls > maxCalls) throw new Error(`Workflow cumulative call limit exceeded (${maxCalls})`);
     };
     let completionOrder: Settlement[];
     try {
@@ -420,7 +491,7 @@ export function workflowEngine(
             if (existing.fingerprint !== requestFingerprint) throw new Error(`Workflow key ${key} was resumed with different input; use a new run key`);
             return;
           }
-          if (current.steps.length >= current.limits.maxAgents) throw new Error(`Workflow agent limit reached (${current.limits.maxAgents})`);
+          if (current.limits.maxAgents !== null && current.steps.length >= current.limits.maxAgents) throw new Error(`Workflow agent limit reached (${current.limits.maxAgents})`);
           const plan = workflowDirectoryPlan(current, directoryInput, key);
           const spawnKey = `workflow:${current.id}:${key}`;
           current.steps.push({
@@ -474,6 +545,7 @@ export function workflowEngine(
               await store.update(run.id, (value) => {
                 if (input.access === "write") {
                   value.status = "interrupted";
+                  delete value.interruption;
                   value.error = message;
                   return;
                 }
@@ -508,7 +580,7 @@ export function workflowEngine(
         const dispatch = async () => {
           let admitted = await store.get(run.id);
           if (admitted.status !== "running") throw new SchedulingDeferred();
-          if (admitted.limits.tokenBudget !== undefined && admitted.steps.find((step) => step.key === key)?.status === "prepared") {
+          if (admitted.limits.tokenBudget != null && admitted.steps.find((step) => step.key === key)?.status === "prepared") {
             const tokenBudget = admitted.limits.tokenBudget;
             const discovered = new Map<string, ReturnType<typeof usage>>();
             for (const step of admitted.steps) {
@@ -601,6 +673,7 @@ export function workflowEngine(
               await store.update(run.id, (value) => {
                 if (input.access === "write") {
                   value.status = "interrupted";
+                  delete value.interruption;
                   value.error = message;
                   return;
                 }
@@ -619,7 +692,7 @@ export function workflowEngine(
               const message = `Worker reported ${report.verdict} but its native execution ended ${native.outcome ?? "without a successful outcome"}`;
               if (recovering) {
                 const resolution = "A durable report exists, but the native execution was interrupted. Ask the same worker to inspect and explicitly resolve the crash window, then resume this workflow.";
-                await store.update(run.id, (value) => { value.status = "interrupted"; value.error = resolution; }, "control");
+                await store.update(run.id, (value) => { value.status = "interrupted"; delete value.interruption; value.error = resolution; }, "control");
                 notify(run.id);
                 throw new UncertainWriteError(resolution);
               }
@@ -655,7 +728,7 @@ export function workflowEngine(
               await workers.send(run.ownerID, {
                 workerID: Session.ID.make(current.workerID),
                 key: `workflow-retry:${run.id}:${key}`,
-                text: "The previous native execution failed before a valid workflows_result report was recorded. Inspect the existing session work, repair the issue, and call workflows_result. Do not redo already-completed external effects.",
+                text: "The previous native execution failed before a valid workflows_result report was recorded. Inspect the existing session work. Finish and inspect already-running required commands before calling workflows_result; native idle is not task completion. Do not cancel unfinished commands or replay already-completed external effects merely to submit a report. Repair the issue and report actual evidence.",
               });
             } else {
               const native = await ctx.session.get({ sessionID: current.workerID }).catch(() => undefined);
@@ -663,7 +736,7 @@ export function workflowEngine(
                 if (input.access === "write") {
                   if (!await recoverPrefill()) {
                     const message = "Interrupted write has uncertain external state. Inspect the retained worker/worktree and send that same worker an explicit resolution request; after it reports, resume this run. The write will not be replayed automatically.";
-                    await store.update(run.id, (value) => { value.status = "interrupted"; value.error = message; }, "control");
+                    await store.update(run.id, (value) => { value.status = "interrupted"; delete value.interruption; value.error = message; }, "control");
                     throw new UncertainWriteError(message);
                   }
                 } else {
@@ -681,10 +754,10 @@ export function workflowEngine(
             if (index >= 0 && value.steps[index].status !== "completed") value.steps[index] = { ...value.steps[index], status: "running" } as WorkflowStep;
           }, "control");
           const agentTimeout = input.timeoutMs ?? run.limits.agentTimeoutMs;
-          const deadline = Date.now() + agentTimeout;
+          const deadline = agentTimeout === null ? undefined : Date.now() + agentTimeout;
           const deadlineReason = () => controller.signal.aborted
             ? controller.signal.reason ?? new Error("Workflow cancelled")
-            : Date.now() >= deadline ? new Error(`Workflow worker timed out after ${agentTimeout}ms`) : undefined;
+            : deadline !== undefined && Date.now() >= deadline ? new Error(`Workflow worker timed out after ${agentTimeout}ms`) : undefined;
           const waitWorker = async () => {
             let timeout: ReturnType<typeof setTimeout> | undefined;
             let abort = () => {};
@@ -701,6 +774,7 @@ export function workflowEngine(
               await Promise.race([
                 ctx.session.wait({ sessionID: current.workerID }),
                 new Promise<never>((_, reject) => {
+                  if (deadline === undefined) return;
                   timeout = setTimeout(() => {
                     const reason = new Error(`Workflow worker timed out after ${agentTimeout}ms`);
                     force(reason);
@@ -750,8 +824,8 @@ export function workflowEngine(
                 workerID: Session.ID.make(current.workerID),
                 key: `workflow-report-repair:${run.id}:${key}`,
                 text: native.outcome === "succeeded"
-                  ? "Your native execution completed without a validated workflows_result. Do not redo the task. Review the existing work and submit the required structured report now."
-                  : "The read-only execution ended before a validated report was recorded. Inspect the existing context, repair or finish the read, and submit workflows_result without creating a new worker.",
+                  ? "Your native execution became idle without a validated workflows_result. Finish and inspect already-running required commands before submitting the structured report; native idle is not task completion. Do not cancel unfinished commands or replay completed effects merely to report. Review the existing work and submit actual evidence."
+                  : "The read-only execution ended before a validated report was recorded. Inspect the existing context. Finish and inspect already-running required commands before submitting workflows_result; native idle is not task completion. Do not cancel unfinished commands or replay completed effects merely to report. Repair or finish the read without creating a new worker.",
               });
               await waitWorker();
               recorded = await ctx.storage.get(resultKey(current.workerID));
@@ -851,7 +925,9 @@ export function workflowEngine(
       },
       checkpoint: async (raw) => {
         countCall();
-        const request = raw as { key?: unknown; prompt?: unknown };
+        const request = raw as { key?: unknown; prompt?: unknown; reviewer?: unknown };
+        const reviewer = request.reviewer ?? "human";
+        if (reviewer !== "human" && reviewer !== "coordinator") throw new Error("Checkpoint reviewer must be human or coordinator");
         const localKey = String(request.key ?? "");
         const key = `${prefix}${localKey}`;
         const prompt = bounded(String(request.prompt ?? ""), 10_000);
@@ -859,7 +935,8 @@ export function workflowEngine(
         const checkpoint = await store.update(runID, (current) => {
           const checkpoint = current.checkpoints.find((item) => item.key === key);
           if (checkpoint && checkpoint.prompt !== prompt) throw new Error(`Checkpoint ${key} changed on resume`);
-          if (!checkpoint) current.checkpoints.push({ key, prompt });
+          if (checkpoint && (checkpoint.reviewer ?? "human") !== reviewer) throw new Error(`Checkpoint ${key} reviewer changed on resume`);
+          if (!checkpoint) current.checkpoints.push({ key, prompt, ...(request.reviewer === undefined ? {} : { reviewer }) });
           if (checkpoint?.response === undefined && current.status === "running") current.status = "waiting";
         });
         const recorded = checkpoint.checkpoints.find((item) => item.key === key)!;
@@ -889,6 +966,7 @@ export function workflowEngine(
           if (response === undefined) throw new Error(`Checkpoint ${key} has a response but no deterministic settlement record`);
           return response;
         }
+        let attentionAttempted = false;
         for (;;) {
           if (controller.signal.aborted) throw controller.signal.reason;
           const reconciled = await reconcileSettlement();
@@ -899,6 +977,10 @@ export function workflowEngine(
             const raced = await reconcileSettlement();
             if (raced !== undefined) return raced;
             throw new Error(`Checkpoint ${key} has a response but no deterministic settlement record`);
+          }
+          if (!attentionAttempted) {
+            attentionAttempted = true;
+            await attend(runID);
           }
           await waitForChange(runID, controller.signal);
         }
@@ -941,6 +1023,7 @@ export function workflowEngine(
           host: hostFor(`${prefix}workflow:${input.name}:${index}/`, depth + 1),
           maxCalls,
           timeoutMs: remaining,
+          helperPolicy: run.helperPolicy,
         });
       },
     });
@@ -948,6 +1031,7 @@ export function workflowEngine(
       const output = await executeWorkflow({
         script: run.script, args: run.args, signal: controller.signal,
         host: hostFor("", 0), maxCalls, timeoutMs: remaining,
+        helperPolicy: run.helperPolicy,
       });
       const latest = await store.get(runID);
       if (latest.status === "stopping" || latest.status === "stopped") {
@@ -973,12 +1057,14 @@ export function workflowEngine(
       await Promise.allSettled([...pendingAgents]);
       await store.update(runID, (current) => {
         if (latest.status === "stopping" || latest.status === "stopped") current.status = "stopped";
+        else if (latest.status === "pausing") current.status = "paused";
         else if (latest.status === "paused" || latest.status === "interrupted") return;
         else { current.status = "failed"; current.error = errorText(error); }
       }, "control");
     } finally {
       clearTimeout(timer);
       const latest = await store.get(runID);
+      await attend(runID);
       if (terminal.has(latest.status)) await deliver(runID);
     }
   }
@@ -1001,6 +1087,7 @@ export function workflowEngine(
       const now = Date.now();
       const run = WorkflowRun.parse({
         version: 1, id, key: input.key, ownerID, callerAgent: runtime.agent,
+        helperPolicy: "optional-counts",
         model: runtime.model, projectID: owner.projectID, directory: owner.location.directory,
         name: parsed.meta.name, description: parsed.meta.description, script, args: input.args,
         fingerprint, limits: input, status: "running", created: now, updated: now,
@@ -1126,8 +1213,10 @@ export function workflowEngine(
       const leased = lease !== undefined && !lease.controller.signal.aborted && !terminal.has(run.status);
       watchWorkflowExecution(sessionID, () => ctx.session.wait({ sessionID }));
       if (!leased && !workflowExecutionAuthorized(sessionID)) {
+        await recover(run.ownerID);
+        const recovered = await owned(run.ownerID, run.id);
         throw new Error(
-          "Workflow worker generation is blocked until its owning workflow is explicitly resumed or the owner sends an authorized follow-up.",
+          `Workflow worker generation is blocked: run ${run.id} (${recovered.status}), step ${JSON.stringify(step.key)} (${step.status}), worker ${sessionID}. Inspect this exact run with workflows_inspect. Execution remains blocked until its owning workflow is explicitly resumed with workflows_control or the owner sends an authorized follow-up to this same worker. Restart metadata is not authorization; inspect uncertain external effects before recovery.`,
         );
       }
     },
@@ -1137,11 +1226,11 @@ export function workflowEngine(
       for (const [runID, lease] of leases) {
         if (lease.owner !== engineOwner) continue;
         await store.update(runID, (run) => {
-          if (!terminal.has(run.status)) {
+          if (run.status === "running" || run.status === "waiting") {
             run.status = "interrupted";
             run.error = "Workflow engine disposed while the run was active; resume explicitly.";
           }
-        }, "control");
+        }, "control", "engine-disposed");
         lease.controller.abort(new Error("Workflow engine disposed"));
         pending.push(lease.promise.catch(() => {}));
       }

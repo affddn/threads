@@ -1,6 +1,7 @@
 import { CodeMode, Tool, toolError } from "@opencode/codemode";
 import { parse } from "acorn";
 import { Effect } from "effect";
+import type { WorkflowHelperPolicy } from "./workflow-runtime-protocol";
 
 export type WorkflowHost = {
   agent(input: unknown): Promise<unknown>;
@@ -216,7 +217,7 @@ const objectSchema = (properties: Record<string, unknown>, required: string[] = 
   type: "object", properties, required, additionalProperties: true,
 });
 
-const prelude = `
+const prelude = (policy: WorkflowHelperPolicy) => `
 const args = await tools.runtime.args({});
 const agent = async (prompt, options = {}) => tools.runtime.agent({ ...options, prompt });
 const phase = async (title) => tools.runtime.phase({ title });
@@ -238,34 +239,42 @@ const pipeline = async (items, ...stages) => Promise.all(items.map(async (item) 
   return value;
 }));
 const retry = async (thunk, options = {}) => {
-  const attempts = positiveInteger(options.attempts === undefined ? 3 : options.attempts, "attempts");
+  ${policy === "optional-counts" ? 'if (typeof thunk !== "function") throw new TypeError("retry thunk must be a function");' : ""}
+  const attempts = options.attempts === undefined ? ${policy === "legacy-bounded" ? "3" : "undefined"} : positiveInteger(options.attempts, "attempts");
   let lastError;
-  for (let attempt = 1; attempt <= attempts; attempt++) {
-    try { return await thunk(attempt); } catch (error) { lastError = error; }
+  for (let attempt = 1; attempts === undefined || attempt <= attempts; attempt++) {
+    try { return await thunk(attempt); } catch (error) {
+      if (error === invalidGateVerdict) throw new TypeError("Workflow gate validator must return a boolean or { ok, feedback? }");
+      lastError = error;
+    }
   }
   throw lastError;
 };
-const gate = async (thunk, validator, options = {}) => retry(async (attempt) => {
+const invalidGateVerdict = {};
+const gate = async (thunk, validator, options = {}) => {
+  ${policy === "optional-counts" ? 'if (typeof thunk !== "function" || typeof validator !== "function") throw new TypeError("gate thunk and validator must be functions");' : ""}
+  return retry(async (attempt) => {
   const value = await thunk(attempt);
   const verdict = await validator(value, attempt);
   const accepted = verdict === true || (verdict !== null && typeof verdict === "object" && verdict.ok === true);
   if (verdict !== true && verdict !== false && (verdict === null || typeof verdict !== "object" || typeof verdict.ok !== "boolean"))
-    throw new TypeError("Workflow gate validator must return a boolean or { ok, feedback? }");
+    ${policy === "optional-counts" ? "throw invalidGateVerdict;" : 'throw new TypeError("Workflow gate validator must return a boolean or { ok, feedback? }");'}
   if (!accepted) {
     const feedback = verdict !== null && typeof verdict === "object" && typeof verdict.feedback === "string" ? ": " + verdict.feedback : "";
     throw new Error("Workflow gate rejected the result" + feedback);
   }
   return value;
-}, options);
-const loopUntilDry = async ({ round, key, consecutiveEmpty = 2, maxRounds = 10 }) => {
+  }, options);
+};
+const loopUntilDry = async ({ round, key, consecutiveEmpty = 2, maxRounds = ${policy === "legacy-bounded" ? "10" : "undefined"} }) => {
   positiveInteger(consecutiveEmpty, "consecutiveEmpty");
-  positiveInteger(maxRounds, "maxRounds");
+  if (maxRounds !== undefined) positiveInteger(maxRounds, "maxRounds");
   if (typeof round !== "function") throw new TypeError("loopUntilDry round must be a function");
   if (typeof key !== "function" && typeof key !== "string") throw new TypeError("loopUntilDry key must be a function or property name");
   const seen = new Set();
   const values = [];
   let empty = 0;
-  for (let index = 1; index <= maxRounds && empty < consecutiveEmpty; index++) {
+  for (let index = 1; (maxRounds === undefined || index <= maxRounds) && empty < consecutiveEmpty; index++) {
     const batch = await round(index);
     if (!Array.isArray(batch)) throw new TypeError("loopUntilDry round must return an array");
     let added = 0;
@@ -291,11 +300,14 @@ export async function executeWorkflowInterpreter(input: {
   host: WorkflowHost;
   maxCalls?: number;
   timeoutMs?: number;
+  helperPolicy?: WorkflowHelperPolicy;
 }): Promise<unknown> {
   const { body } = parseWorkflow(input.script);
   validateBody(body);
   const maxCalls = positiveOption(input.maxCalls, "maxCalls");
   const timeoutMs = positiveOption(input.timeoutMs, "timeoutMs");
+  const helperPolicy = input.helperPolicy ?? "legacy-bounded";
+  if (helperPolicy !== "legacy-bounded" && helperPolicy !== "optional-counts") throw new TypeError("Invalid workflow helper policy");
   if (input.signal.aborted) throw input.signal.reason ?? new DOMException("Aborted", "AbortError");
   let calls = 0;
   const pending = new Set<Promise<void>>();
@@ -354,7 +366,7 @@ export async function executeWorkflowInterpreter(input: {
   });
   let result: CodeMode.Result;
   try {
-    result = await Effect.runPromise(runtime.execute(`${prelude}\n${body}`), { signal: input.signal });
+    result = await Effect.runPromise(runtime.execute(`${prelude(helperPolicy)}\n${body}`), { signal: input.signal });
   } catch (error) {
     throw error;
   }

@@ -5,6 +5,7 @@ import {
   assertBoundedMessage,
   boundedDiagnostic,
   type HostMethod,
+  type WorkflowHelperPolicy,
   type ParentToWorker,
   type WorkerToParent,
 } from "./workflow-runtime-protocol";
@@ -24,6 +25,7 @@ type ExecuteInput = {
   host: WorkflowHost;
   maxCalls?: number;
   timeoutMs?: number;
+  helperPolicy?: WorkflowHelperPolicy;
 };
 
 const MAX_RUNTIME_WORKERS = 64;
@@ -130,7 +132,7 @@ export async function executeWorkflow(input: ExecuteInput): Promise<unknown> {
   worker.onerror = (event: ErrorEvent) => stop(new Error(boundedDiagnostic(event.error ?? event.message)));
 
   try {
-    worker.postMessage({ type: "start", script: input.script, args: input.args, maxCalls, timeoutMs } satisfies ParentToWorker);
+    worker.postMessage({ type: "start", script: input.script, args: input.args, maxCalls, timeoutMs, helperPolicy: input.helperPolicy } satisfies ParentToWorker);
     return await result;
   } finally {
     acceptingCalls = false;

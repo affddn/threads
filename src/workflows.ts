@@ -5,6 +5,7 @@ import type { Plugin } from "@opencode/plugin";
 import type { SessionContext } from "@opencode/plugin/promise/session";
 import { z } from "zod";
 import { threads } from "./threads";
+import { heartbeat } from "./heartbeat";
 import { workflowEngine } from "./workflow-engine";
 import { WorkflowControl, WorkflowsRpc } from "./workflow-rpc";
 import { savedWorkflows, SavedWorkflow } from "./workflow-saved";
@@ -17,10 +18,10 @@ export async function workflows(
   maxWorkers: number,
 ) {
   const concurrency = WorkflowLimits.shape.concurrency.parse(ctx.options.workflowConcurrency);
-  const maxAgents = WorkflowLimits.shape.maxAgents.parse(ctx.options.workflowMaxAgents);
+  const maxAgents = WorkflowStart.shape.maxAgents.parse(ctx.options.workflowMaxAgents);
   const startInput = WorkflowStart.safeExtend({
     concurrency: WorkflowLimits.shape.concurrency.default(concurrency),
-    maxAgents: WorkflowLimits.shape.maxAgents.default(maxAgents),
+    maxAgents: WorkflowStart.shape.maxAgents.default(maxAgents),
   });
   const saved = savedWorkflows(ctx.location.directory, ctx.location.project.canonical);
   const engine = workflowEngine(ctx, workers, {
@@ -28,6 +29,7 @@ export async function workflows(
     loadSaved: (name: string) => saved.load(name),
     warmWorker: (sessionID: string) => ctx.session.command({ sessionID, name: "workflow-refresh", text: "" }),
   });
+  await heartbeat(ctx);
   const rpc = await ctx.rpc.register(WorkflowsRpc, {
     snapshot: async ({ ownerID }) => ({ runs: (await engine.list(ownerID)).map(workflowSummary) }),
     inspect: ({ ownerID, runID }) => engine.get(ownerID, runID),

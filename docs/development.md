@@ -10,6 +10,8 @@ This page is for working on Threads itself: setting up a checkout, running the c
 
 A local checkout loads `tui.ts` directly. The npm package ships a compiled `tui.js` instead.
 
+Editing a loaded local plugin can unload and reload it without restarting the server. Threads records active workflows as interrupted during cleanup. To keep development edits from interrupting everyday work, install a verified tarball under a separate `node_modules` directory and point your global configuration there.
+
 ## Find your way around
 
 | Path | Contents |
@@ -46,9 +48,13 @@ The native suites start an isolated OpenCode server with a deterministic local m
 | `bun run verify:workflow-regressions` | Known workflow engine defects stay fixed. |
 | `bun run verify:workflow-runtime` | Script cancellation and thread cleanup in the confined runtime. |
 | `bun run verify:workflow-capacity` | Concurrency, total steps, controls, deadlines, and cleanup under load. |
+| `python3 scripts/verify-heartbeat.py` | The packaged heartbeat runner, durable reminders, input holds, and isolated LaunchAgent cleanup. |
+| `python3 scripts/verify-workflow-lifecycle.py` | Task Location invalidation, isolated restart, plugin reload, and inspection-only interruption reminders. |
 | `bun run verify:package-ui <package>` | A packed or published package, installed under `node_modules`, in a clean terminal. |
 
 Run the checks that match your change. Evidence goes to `.audit/`, which git ignores.
+
+Set `OPENCODE_SOURCE` to an OpenCode V2 source checkout to run the permission-oracle tests against its native evaluator. Those tests skip when the variable is absent.
 
 ## Keep the published package loadable
 

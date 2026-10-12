@@ -13,15 +13,21 @@ When a step needs a directory outside its location, such as a reference reposito
 
 1. Define the result, named slices, and verification predicate. For VERA tasks, retain the selected protocol and role profiles.
 2. Read [the runtime contract](references/runtime.md). Write a script with a literal `export const meta` first, named agent steps, and a final JSON result.
-3. Call `workflows_start` with a unique task key, `script` or saved `name`, JSON `args`, and the smallest useful concurrency and agent limit. It returns immediately.
+3. Call `workflows_start` with a unique task key, `script` or saved `name`, JSON `args`, and suitable concurrency. Omit task budgets unless the user requested them. It returns immediately.
 4. Continue independent work. The runner delivers a final notification. Use `workflows_inspect` for evidence and `workflows_control` for pause, stop, resume, and checkpoint responses. Never infer success from an idle worker.
 5. Inspect the result and the affected artifacts before giving the final verdict. Save a useful script with `workflows_save`; its arguments and transcripts are not saved with it.
 
-Every step selects an actual configured `agent`. Use `vera-operator-readonly` for discovery, `vera-engineer` for implementation, and `vera-auditor-readonly` for independent review. Model choices remain in the profiles. Workflow workers are leaves. The runner bounds the complete run, including nested workflows.
+Every step selects an actual configured `agent`. Use `vera-operator-readonly` for discovery, `vera-engineer` for implementation, and `vera-auditor-readonly` for independent review. Model choices remain in the profiles. Workflow workers are leaves. Any user-supplied run budgets also cover nested workflows.
+
+Budgets are opt-in. Do not estimate or invent `tokenBudget`, `maxAgents`, `agentTimeoutMs`, `timeoutMs`, helper `attempts` or `maxRounds`, heartbeat wake caps, or monitoring deadlines. Leave those fields unset unless the user supplies a limit. If the user asks for a budget without giving a value, ask for the value instead of estimating it. An omitted budget means no task budget, not an estimated fallback. Preserve explicitly configured user limits. Concurrency and worker capacity are separate settings.
 
 Use `access: "read"` for investigations. It denies edits and shell commands. Real command-based verification needs a suitably permitted worker with `access: "write"`, even when its intended task is only running tests. Use `isolation: "worktree"` for independent implementations and return the retained directory and changed paths. Give subsequent verification the same directory. The root owns integration.
 
 Verification evidence is part of the handoff. `FAIL` and `INCONCLUSIVE` cannot establish a passing step. Do not replace execution evidence with reviewer votes. A workflow does not expand the user's authorization for external actions.
+
+Workers finish required commands and inspect their results before reporting or ending their execution. Keep dependent checks in a foreground tool call; if a tool backgrounds them, collect its completion before finishing. A missing-report reminder asks the worker to complete the handoff, not cancel unfinished checks. Native idle while a command is still running is not task completion.
+
+For requested unattended monitoring, use the packaged `workflows_heartbeat_*` tools and shared runner described in [Workflow heartbeats](../../docs/heartbeat.md). Enroll the recorded run instead of creating a project-specific monitor. Heartbeat reminders ask for inspection; they do not answer checkpoints or establish completion. Mark an authorized coordinator review with `checkpoint(prompt, { key, reviewer: "coordinator" })`; checkpoints default to human review.
 
 ## Example
 
@@ -49,6 +55,6 @@ const findings = await pipeline(args.modules, module => agent(
 return findings;
 ```
 
-Invoke with structured arguments, for example `args: { modules: ["src/auth", "src/billing"], check: "missing authorization checks" }`. Set `maxAgents` to cover the named slices and any verification steps. Built-in defaults are four total agents and three concurrent agents; plugin options can override them. The `workflows_start` schema shows the configured defaults.
+Invoke with structured arguments, for example `args: { modules: ["src/auth", "src/billing"], check: "missing authorization checks" }`. The default concurrency is three; plugin options can override it. The `workflows_start` schema shows explicitly configured limits. Do not derive a `maxAgents` budget from the planned slices.
 
 The example returns candidate findings. Add an independent confirmation stage when the task requires a verified report.

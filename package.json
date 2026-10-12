@@ -8,7 +8,8 @@
     ".": "./index.ts",
     "./tui": "./tui.js"
   },
-  "files": ["index.ts", "tui.js", "tsconfig.json", "src/", "skills/", "docs/", "CHANGELOG.md"],
+  "files": ["index.ts", "tui.js", "bin/op-threads-heartbeat.mjs", "tsconfig.json", "src/", "skills/", "docs/", "CHANGELOG.md"],
+  "bin": { "op-threads-heartbeat": "./bin/op-threads-heartbeat.mjs" },
   "repository": {
     "type": "git",
     "url": "git+https://github.com/opzero1/threads.git"
@@ -43,7 +44,8 @@
   },
   "scripts": {
     "build:tui": "bun scripts/build-tui.ts",
-    "prepack": "bun run build:tui",
+    "build:heartbeat": "bun scripts/build-heartbeat.ts",
+    "prepack": "bun run build:tui && bun run build:heartbeat",
     "typecheck": "tsc --noEmit",
     "test": "bun test",
     "verify:live": "uv run --with pyte python scripts/verify-live.py",
@@ -56,6 +58,7 @@
     "verify:workflow-runtime": "bun scripts/verify-workflow-runtime.ts"
   },
   "dependencies": {
+    "@opencode/client": "2.0.7",
     "@opencode/codemode": "2.0.12",
     "@opencode/plugin": "2.0.7",
     "@opencode/schema": "2.0.7",

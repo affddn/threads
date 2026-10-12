@@ -1,4 +1,4 @@
-import { describe, expect, test } from "bun:test";
+import { describe, expect, spyOn, test } from "bun:test";
 import { executeWorkflow, parseWorkflow, type WorkflowHost } from "../src/workflow-runtime";
 
 const meta = `export const meta = { name: "test", description: "runtime test", phases: [{ title: "Run" }] };`;
@@ -38,6 +38,31 @@ describe("workflow metadata", () => {
 });
 
 describe("real CodeMode workflow execution", () => {
+  test("an unbounded real runner creates no deadline timer and caller cancellation drains its internal host signal", async () => {
+    const controller = new AbortController();
+    let started!: () => void;
+    const didStart = new Promise<void>((resolve) => { started = resolve; });
+    let hostCancelled = false;
+    const schedule = spyOn(globalThis, "setTimeout");
+    const promise = run('return await agent("wait");', { signal: controller.signal, host: host({
+      agent: async (_input, signal) => {
+        started();
+        await new Promise<void>((_, reject) => signal?.addEventListener("abort", () => {
+          hostCancelled = true;
+          reject(signal.reason);
+        }, { once: true }));
+      },
+    }) });
+    try {
+      await didStart;
+      expect(schedule.mock.calls).toEqual([]);
+      controller.abort(new Error("explicit cancellation"));
+      await expect(promise).rejects.toThrow("explicit cancellation");
+      expect(hostCancelled).toBe(true);
+      expect(await run("return true;")).toBe(true);
+    } finally { controller.abort(); schedule.mockRestore(); }
+  });
+
   test("computed data keys remain usable while CodeMode rejects computed Function construction", async () => {
     expect(await run('const key = "va" + "lue"; return args[key];')).toBe(7);
     await expect(run(`const key = "constructo" + "r";
