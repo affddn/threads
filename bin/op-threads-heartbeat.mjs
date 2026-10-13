@@ -412,6 +412,7 @@ import { Service } from "@opencode/client/service";
 import { readFile } from "node:fs/promises";
 import { z as z5 } from "zod";
 var unavailable = "Existing compatible service unavailable; connect-only runner will not start it";
+var Version = z5.enum(["2.0.26", "2.0.28"]);
 var Registration = z5.object({
   url: z5.string().transform((value, context) => {
     const native = /^(https?:\/\/)(::1|::):([0-9]+)\/?$/.exec(value);
@@ -435,10 +436,10 @@ var Registration = z5.object({
     }
   }),
   pid: z5.number().int().positive(),
-  version: z5.literal("2.0.26"),
+  version: Version,
   password: z5.string().optional()
 });
-var Info = z5.object({ pid: z5.number().int().positive(), version: z5.literal("2.0.26") });
+var Info = z5.object({ pid: z5.number().int().positive(), version: Version });
 var heartbeatFetch = Object.assign((input, init) => fetch(input, { ...init, redirect: "error", signal: init?.signal ? AbortSignal.any([init.signal, AbortSignal.timeout(25000)]) : AbortSignal.timeout(25000) }), { preconnect: fetch.preconnect });
 async function heartbeatEndpoint(file) {
   const text = await readFile(file, "utf8").catch(() => {
@@ -456,14 +457,14 @@ async function heartbeatEndpoint(file) {
       throw new Error("Heartbeat requires a valid unambiguous loopback service");
     throw new Error(unavailable);
   }
-  const { url, pid, password } = registration.data;
+  const { url, pid, password, version } = registration.data;
   const endpoint = { url, auth: password === undefined ? undefined : { type: "basic", username: "opencode", password } };
   try {
     const response = await heartbeatFetch(new URL("/api/info", url), { headers: Service.headers(endpoint), signal: AbortSignal.timeout(2000) });
     if (!response.ok)
       throw new Error(unavailable);
     const info = Info.parse(await response.json());
-    if (info.pid !== pid)
+    if (info.pid !== pid || info.version !== version)
       throw new Error(unavailable);
     return endpoint;
   } catch {

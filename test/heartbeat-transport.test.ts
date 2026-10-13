@@ -4,6 +4,36 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { heartbeatOnce, RunnerConfig } from "../src/heartbeat-runner";
 
+test("transport supports OpenCode 2.0.28 while rejecting mismatched registered and live versions", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "heartbeat-upgrade-"));
+  const file = join(dir, "service.json");
+  const config = RunnerConfig.parse({ protocol: 1, serviceFile: file, hostDirectory: dir, node: process.execPath, runner: "/unused", intervalMs: 60_000, label: "com.opthreads.heartbeat.test", launchAgentsDirectory: dir });
+  let version = "2.0.28";
+  let snapshots = 0;
+  const server = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch(request) {
+    expect(request.headers.get("authorization")).toBe(`Basic ${Buffer.from("opencode:upgrade-fixture").toString("base64")}`);
+    if (new URL(request.url).pathname === "/api/info") return Response.json({ pid: process.pid, version });
+    snapshots++;
+    return Response.json({ output: { protocol: 1, entries: [] } });
+  } });
+  const put = (registered: string) => writeFile(file, JSON.stringify({ url: server.url.toString(), pid: process.pid, version: registered, password: "upgrade-fixture" }));
+  try {
+    await put("2.0.28");
+    const original = await readFile(file, "utf8");
+    expect(await heartbeatOnce(config, false)).toEqual({ protocol: 1, shadow: false, decisions: [] });
+    expect(snapshots).toBe(1);
+    version = "2.0.26";
+    await expect(heartbeatOnce(config, false)).rejects.toThrow("Existing compatible service unavailable");
+    expect(await readFile(file, "utf8")).toBe(original);
+    version = "2.0.28";
+    await put("2.0.26");
+    await expect(heartbeatOnce(config, false)).rejects.toThrow("Existing compatible service unavailable");
+    await put("2.0.29");
+    await expect(heartbeatOnce(config, false)).rejects.toThrow("Existing compatible service unavailable");
+    expect(snapshots).toBe(1);
+  } finally { await server.stop(true); await rm(dir, { recursive: true, force: true }); }
+});
+
 test("transport rejects unsafe registrations, bad health and redirects without issuing monitor writes", async () => {
   const dir = await mkdtemp(join(tmpdir(), "heartbeat-transport-"));
   const file = join(dir, "service.json");

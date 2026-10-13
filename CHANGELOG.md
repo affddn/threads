@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Update OpenCode dependencies to `2.0.28` and Effect to `4.0.1` so Threads loads with the host's stable Effect runtime. Heartbeat accepts `2.0.28` as well as `2.0.26`, with matching registered and live versions required.
+- Fresh workflow workers wait for their task after a worktree move. An earlier native idle outcome no longer causes a false write interruption.
 - Heartbeat requests normalize OpenCode's unbracketed local IPv6 registration URLs in memory, preserve exact version and PID checks, and reject redirects. Native registration files remain unchanged.
 - Streamed text, reasoning, tool input, compaction, step content and tool progress no longer trigger worker or workflow snapshots. Lifecycle and attention events still refresh immediately; progressing workflows and open workflow panels retain periodic freshness.
 - Add durable workflow heartbeat tools and a packaged, connect-only macOS runner. Optional wake caps and deadlines survive restarts and run replacement without replenishment.

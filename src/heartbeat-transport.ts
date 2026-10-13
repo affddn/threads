@@ -3,6 +3,7 @@ import { readFile } from "node:fs/promises";
 import { z } from "zod";
 
 const unavailable = "Existing compatible service unavailable; connect-only runner will not start it";
+const Version = z.enum(["2.0.26", "2.0.28"]);
 const Registration = z.object({
   url: z.string().transform((value, context) => {
     const native = /^(https?:\/\/)(::1|::):([0-9]+)\/?$/.exec(value);
@@ -23,10 +24,10 @@ const Registration = z.object({
     }
   }),
   pid: z.number().int().positive(),
-  version: z.literal("2.0.26"),
+  version: Version,
   password: z.string().optional(),
 });
-const Info = z.object({ pid: z.number().int().positive(), version: z.literal("2.0.26") });
+const Info = z.object({ pid: z.number().int().positive(), version: Version });
 
 export const heartbeatFetch = Object.assign(
   (input: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]) =>
@@ -46,13 +47,13 @@ export async function heartbeatEndpoint(file: string) {
     if (registration.error.issues.some((issue) => issue.path[0] === "url")) throw new Error("Heartbeat requires a valid unambiguous loopback service");
     throw new Error(unavailable);
   }
-  const { url, pid, password } = registration.data;
+  const { url, pid, password, version } = registration.data;
   const endpoint = { url, auth: password === undefined ? undefined : { type: "basic" as const, username: "opencode", password } };
   try {
     const response = await heartbeatFetch(new URL("/api/info", url), { headers: Service.headers(endpoint), signal: AbortSignal.timeout(2_000) });
     if (!response.ok) throw new Error(unavailable);
     const info = Info.parse(await response.json());
-    if (info.pid !== pid) throw new Error(unavailable);
+    if (info.pid !== pid || info.version !== version) throw new Error(unavailable);
     return endpoint;
   } catch {
     throw new Error(unavailable);

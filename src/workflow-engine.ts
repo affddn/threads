@@ -732,7 +732,7 @@ export function workflowEngine(
               });
             } else {
               const native = await ctx.session.get({ sessionID: current.workerID }).catch(() => undefined);
-              if (current.status === "running" && native?.outcome !== undefined) {
+              if (!fresh && current.status === "running" && native?.outcome !== undefined) {
                 if (input.access === "write") {
                   if (!await recoverPrefill()) {
                     const message = "Interrupted write has uncertain external state. Inspect the retained worker/worktree and send that same worker an explicit resolution request; after it reports, resume this run. The write will not be replayed automatically.";

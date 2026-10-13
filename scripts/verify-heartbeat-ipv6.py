@@ -23,6 +23,8 @@ artifacts = options.artifacts.resolve()
 artifacts.mkdir(parents=True, exist_ok=False)
 runner = package / "bin/op-threads-heartbeat.mjs"
 binary = Path(shutil.which("opencode")).resolve()
+version = subprocess.check_output([str(binary), "--version"], text=True).strip().removeprefix("opencode v")
+registration_prefix = "http://::1:" if version == "2.0.26" else "http://[::1]:"
 label = "com.opthreads.heartbeat.ipv6-" + uuid.uuid4().hex
 config_file = artifacts / "runner.json"
 domain = "gui/" + str(os.getuid())
@@ -112,13 +114,13 @@ try:
     receipt["registration"] = {key: before[key] for key in ("pid", "version", "url")}
     receipt["directIPv6Health"] = sandbox.api("GET", "/api/info")
     receipt["listener"] = command(["/usr/sbin/lsof", "-nP", "-a", "-p", str(sandbox.process.pid), "-iTCP", "-sTCP:LISTEN"]).stdout
-    check("unchanged native 2.0.26 writes its malformed IPv6 registration", before["version"] == "2.0.26" and before["url"].startswith("http://::1:"))
+    check(f"unchanged native {version} writes its expected IPv6 registration", before["version"] == version and before["url"].startswith(registration_prefix))
     check("OS confirms an IPv6 loopback listener", "IPv6" in receipt["listener"] and "[::1]:" in receipt["listener"])
     cli("install", "--service-file", str(service), "--host-directory", str(host), "--label", label, "--launchagents-directory", str(artifacts / "agents"))
     installed = True
     eventually(lambda: len(lines("runner.log")) > 0)
     check("packaged external Node runner completes a real IPv6 tick", json.loads(lines("runner.log")[-1]) == {"protocol": 1, "shadow": False, "decisions": []})
-    check("runner leaves the malformed registration byte-identical", service.read_bytes() == before_bytes)
+    check("runner leaves the native registration byte-identical", service.read_bytes() == before_bytes)
     pid = runner_pid()
     receipt["runnerPID"] = pid
     before_ticks = len(lines("runner.log"))
@@ -131,7 +133,7 @@ try:
     after_bytes = service.read_bytes()
     after = json.loads(after_bytes)
     receipt["refreshedRegistration"] = {key: after[key] for key in ("pid", "version", "url")}
-    check("native restart refreshes malformed IPv6 PID and URL", after["pid"] != before["pid"] and after["url"] != before["url"] and after["url"].startswith("http://::1:"))
+    check("native restart refreshes IPv6 PID and URL", after["pid"] != before["pid"] and after["url"] != before["url"] and after["url"].startswith(registration_prefix))
     eventually(lambda: len(lines("runner.log")) > before_ticks, timeout=80)
     check("same external runner reconnects through fresh registration", runner_pid() == pid and json.loads(lines("runner.log")[-1]) == {"protocol": 1, "shadow": False, "decisions": []})
     check("refreshed registration remains byte-identical", service.read_bytes() == after_bytes)

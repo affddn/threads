@@ -13,7 +13,7 @@ import { withWorkflowSlot, workflowDirectoryPlan } from "../src/workflow-worker"
 const temporary: string[] = [];
 afterEach(async () => Promise.all(temporary.splice(0).map((path) => rm(path, { recursive: true, force: true }))));
 
-async function harness(mode: "valid" | "repair" | "missing" | "reported-fail" | "manual" | "unmeasured" | "timeout-race" | "timeout-reject" | "large-error", maxWorkers = 2) {
+async function harness(mode: "valid" | "repair" | "missing" | "reported-fail" | "manual" | "move-idle" | "unmeasured" | "timeout-race" | "timeout-reject" | "large-error", maxWorkers = 2) {
   const directory = await mkdtemp(join(tmpdir(), "workflow-engine-"));
   temporary.push(directory);
   const file = join(directory, "storage.json");
@@ -63,7 +63,13 @@ async function harness(mode: "valid" | "repair" | "missing" | "reported-fail" | 
         if (!session) throw { _tag: "Session.NotFoundError", sessionID };
         return session;
       },
-      async wait({ sessionID }: { sessionID: string }) { await waits.get(sessionID); },
+      async wait({ sessionID }: { sessionID: string }) {
+        if (mode === "move-idle") {
+          await api.result(sessionID, { verdict: "PASS", summary: "write completed", evidence: ["worktree"], result: { ok: true } });
+          manual.get(sessionID)?.();
+        }
+        await waits.get(sessionID);
+      },
       async synthetic(input: { id: string; text: string; metadata?: unknown }) {
         deliveries.push(input.id);
         deliveryTexts.push(input.text);
@@ -126,6 +132,7 @@ async function harness(mode: "valid" | "repair" | "missing" | "reported-fail" | 
       const { ownerID: workflowOwnerID, runID, stepKey, callerAgent } = metadata;
       sessions.set(workerID, {
         id: workerID, projectID: "project", location: { directory },
+        ...(mode === "move-idle" ? { outcome: "succeeded" } : {}),
         metadata: {
           opThreads: {
             workerID, coordinatorID: actor, key: input.key, fingerprint: "harness",
@@ -143,7 +150,7 @@ async function harness(mode: "valid" | "repair" | "missing" | "reported-fail" | 
       waits.set(workerID, wait);
       for (const notify of spawnWaiters.get(String(stepKey)) ?? []) notify();
       spawnWaiters.delete(String(stepKey));
-      if (mode === "manual" || mode === "timeout-race" || mode === "timeout-reject" || mode === "large-error") {
+      if (mode === "manual" || mode === "move-idle" || mode === "timeout-race" || mode === "timeout-reject" || mode === "large-error") {
         manual.set(workerID, resolve);
         return { workerID };
       }
@@ -318,6 +325,19 @@ async function reaches(api: ReturnType<typeof workflowEngine>, ownerID: string, 
 }
 
 describe("durable workflow engine", () => {
+  test("fresh worktree worker waits for its task despite an earlier move idle outcome", async () => {
+    const fixture = await harness("move-idle");
+    try {
+      const started = await fixture.api.start(fixture.ownerID, WorkflowStart.parse({
+        key: "move-idle", script: script.replace('agent: "analyst",', 'agent: "analyst", access: "write", isolation: "worktree",'),
+      }), { agent: "caller", model: { providerID: "test", id: "model" } });
+      const completed = await settled(fixture.api, fixture.ownerID, started.id);
+      expect(completed.status).toBe("completed");
+      expect(completed.result).toEqual({ ok: true });
+      expect(fixture.spawns()).toBe(1);
+      expect(fixture.workerEvents).toEqual(["spawn"]);
+    } finally { await fixture.api.dispose(); }
+  });
   for (const boundary of ["dispose", "recover"] as const) {
     test(`lifecycle provenance: ${boundary} persists typed cause and resume clears it`, async () => {
       const fixture = await harness("valid");

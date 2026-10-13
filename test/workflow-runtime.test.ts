@@ -68,7 +68,9 @@ describe("real CodeMode workflow execution", () => {
     await expect(run(`const key = "constructo" + "r";
       const F = (() => {})[key]; return F("return typeof process")();`)).rejects.toThrow("Function constructor is not supported");
     expect(await run('const key = "__prot" + "o__"; const value = {}; value[key] = {leaked: 1}; return value.leaked === undefined;')).toBe(true);
-    await expect(run('const key = "getPrototype" + "Of"; return Object[key]({});')).rejects.toThrow("not a function");
+    expect(await run('const key = "getPrototype" + "Of"; return Object[key](Object[key]({})) === null;')).toBe(true);
+    await expect(run(`const key = "getPrototype" + "Of"; const ctor = "constructo" + "r";
+      const F = Object[key]({})[ctor][ctor]; return F("return typeof process")();`)).rejects.toThrow("Function constructor is not supported");
     await expect(run('const key = "define" + "Property"; const value = {}; Object[key](value, "x", {value:1}); return value;')).rejects.toThrow("not a function");
   });
   test("returning before a started agent finishes cannot claim workflow success", async () => {
