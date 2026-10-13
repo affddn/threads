@@ -54,25 +54,29 @@ test("omitted runtime policy retains historical defaults", async () => {
   `, { helperPolicy: undefined })).toEqual({ retries: 3, gates: 3, rounds: 10 });
 });
 
-test("invalid unlimited helper arguments reject instead of spinning", async () => {
-  for (const value of ["0", "-1", "1.5", "null", "NaN", "Infinity", '"4"', "1001"]) {
-    for (const body of [
+for (const value of ["0", "-1", "1.5", "null", "NaN", "Infinity", '"4"', "1001"]) {
+  for (const body of [
       `return retry(() => { throw new Error("again"); }, {attempts:${value}});`,
       `return gate(() => 1, () => false, {attempts:${value}});`,
       `return loopUntilDry({key:"id", round:(index) => [{id:index}], maxRounds:${value}});`,
       `return loopUntilDry({key:"id", round:() => [], consecutiveEmpty:${value}});`,
-    ]) await expect(run(body, { timeoutMs: 1000 })).rejects.toThrow("safe positive integer");
+  ]) {
+    test(`invalid unlimited helper arguments reject instead of spinning: ${body}`, async () => {
+      await expect(run(body, { timeoutMs: 1000 })).rejects.toThrow("safe positive integer");
+    });
   }
-  for (const body of [
+}
+for (const body of [
     `return retry(1);`, `return gate(1, () => true);`, `return gate(() => 1, false);`,
     `return gate(() => 1, () => ({truthy:true}));`,
     `return loopUntilDry({key:"id", round:() => 1});`,
     `return loopUntilDry({key:null, round:() => []});`,
-  ]) {
+]) {
+  test(`invalid unlimited helper arguments reject instead of spinning: ${body}`, async () => {
     try { await run(body, { timeoutMs: 1000 }); throw new Error("unexpected success"); }
     catch (error) { expect(String(error)).not.toContain("timed out"); expect(String(error)).toMatch(/function|boolean|array/); }
-  }
-});
+  });
+}
 
 test("malformed gate verdicts fail immediately only under the new policy", async () => {
   const body = `let calls = 0; try { await gate(() => ++calls, () => ({truthy:true})); } catch (error) {} return calls;`;

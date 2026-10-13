@@ -14,6 +14,7 @@ import { ActivityPicker } from "./activity-picker";
 import { workInProgress } from "./idle";
 import { ThreadsRpc, WorkerView } from "./rpc";
 import { applyWorkerSnapshot, uiState } from "./ui-location";
+import { snapshotEvent } from "./snapshot-events";
 
 type Session = NonNullable<
   ReturnType<Plugin.Context["data"]["session"]["get"]>
@@ -327,7 +328,7 @@ export function activity(
   }
   let refreshTimer: ReturnType<typeof setTimeout> | undefined;
   const stopEvents = ctx.data.listen(({ details }) => {
-    if (!details.type.startsWith("session.")) return;
+    if (!snapshotEvent(details.type)) return;
     if (details.type === "session.deleted") {
       const sessionID = details.data.sessionID;
       deleted.add(sessionID);

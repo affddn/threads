@@ -12,7 +12,8 @@ from sandbox import Sandbox, Terminal, eventually
 
 root = Path(__file__).resolve().parent.parent
 target = Path(sys.argv[1]).resolve() if len(sys.argv) > 1 else root
-artifacts = root / ".audit" / "workflows"
+artifacts = Path(os.environ["THREADS_ARTIFACT_DIR"]).resolve() if "THREADS_ARTIFACT_DIR" in os.environ else root / ".audit" / "workflows"
+artifacts.mkdir(parents=True, exist_ok=False)
 provider = Provider()
 sandbox = None
 terminal = None
@@ -130,6 +131,11 @@ def wait_node(id, check, description):
 
 
 def click(node):
+    # Drain the full PTY frame before using the probe's mouse coordinates.
+    terminal.drain()
+    node = wait_node(node["id"], lambda _: True, "fresh click target")
+    (artifacts / f"click-{node['id']}.json").write_text(json.dumps(node, indent=2))
+    (artifacts / f"click-{node['id']}.screen.txt").write_text("\n".join(terminal.screen.display))
     x, y = node["x"] + 2, node["y"] + 1
     os.write(terminal.master, f"\x1b[<0;{x};{y}M\x1b[<0;{x};{y}m".encode())
 

@@ -49,10 +49,13 @@ The native suites start an isolated OpenCode server with a deterministic local m
 | `bun run verify:workflow-runtime` | Script cancellation and thread cleanup in the confined runtime. |
 | `bun run verify:workflow-capacity` | Concurrency, total steps, controls, deadlines, and cleanup under load. |
 | `python3 scripts/verify-heartbeat.py` | The packaged heartbeat runner, durable reminders, input holds, and isolated LaunchAgent cleanup. |
+| `python3 scripts/verify-heartbeat-ipv6.py --package <absolute-package-directory> --artifacts <new-directory>` | The external runner survives an unchanged OpenCode IPv6 restart without rewriting native registration. |
 | `python3 scripts/verify-workflow-lifecycle.py` | Task Location invalidation, isolated restart, plugin reload, and inspection-only interruption reminders. |
 | `bun run verify:package-ui <package>` | A packed or published package, installed under `node_modules`, in a clean terminal. |
 
 Run the checks that match your change. Evidence goes to `.audit/`, which git ignores.
+
+Use `THREADS_ARTIFACT_DIR=<new-directory>` to retain separate footer and workflow attempts. To compare streaming load, run `uv run --with pyte python scripts/measure-native-load.py <baseline-package> <changed-package> <new-directory>`. The harness measures native snapshots, journal reads, and concurrent health requests with closed and open workflow panels.
 
 Set `OPENCODE_SOURCE` to an OpenCode V2 source checkout to run the permission-oracle tests against its native evaluator. Those tests skip when the variable is absent.
 

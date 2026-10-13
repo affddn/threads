@@ -12,8 +12,8 @@ from sandbox import Sandbox, Terminal, eventually
 
 root = Path(__file__).resolve().parent.parent
 target = Path(sys.argv[1]).resolve() if len(sys.argv) > 1 else root
-artifacts = root / ".audit" / ("footer" if target == root else "footer-package")
-shutil.rmtree(artifacts, ignore_errors=True)
+artifacts = Path(os.environ["THREADS_ARTIFACT_DIR"]).resolve() if "THREADS_ARTIFACT_DIR" in os.environ else root / ".audit" / ("footer" if target == root else "footer-package")
+artifacts.mkdir(parents=True, exist_ok=False)
 provider = Provider()
 sandbox = None
 terminal = None
@@ -117,9 +117,10 @@ def picker_rows(node=None):
 
 
 def row(session_id):
-    title = text(f"activity-picker-title-{session_id}")
-    subtitle = text(f"activity-picker-subtitle-{session_id}")
-    return None if title is None else {"title": title, "subtitle": subtitle, "y": rect(f"activity-picker-title-{session_id}")["y"]}
+    tree = state()["tree"]
+    title = find(tree, f"activity-picker-title-{session_id}")
+    subtitle = find(tree, f"activity-picker-subtitle-{session_id}")
+    return None if title is None or title.get("text") is None else {"title": title["text"], "subtitle": (subtitle or {}).get("text"), "y": title["y"]}
 
 
 def footer_texts(node=None):
@@ -175,6 +176,7 @@ def idle(session_id):
 
 try:
     sandbox = Sandbox(config(target, provider), artifacts)
+    sandbox.await_plugin()
     coordinator = sandbox.api("POST", "/api/session", {"title": "[Main] Footer coordinator", "location": {"directory": str(sandbox.directory)}})["data"]
     local = sandbox.api("POST", "/api/session", {"title": "Local history", "location": {"directory": str(sandbox.directory)}})["data"]
     elsewhere = sandbox.api("POST", "/api/session", {"title": "Elsewhere history", "location": {"directory": str(sandbox.worker)}})["data"]

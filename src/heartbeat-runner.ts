@@ -9,25 +9,14 @@ import { z } from "zod";
 import { HeartbeatRpc, SnapshotOutput } from "./heartbeat-rpc";
 import { heartbeatObserve } from "./heartbeat-observe";
 import { heartbeatProjectionDecision } from "./heartbeat-policy";
+import { heartbeatEndpoint, heartbeatFetch } from "./heartbeat-transport";
 
 export const RunnerConfig = z.object({ protocol: z.literal(1), serviceFile: z.string(), hostDirectory: z.string(), node: z.string(), runner: z.string(), intervalMs: z.literal(60_000), label: z.string().regex(/^com\.opthreads\.heartbeat(?:\.[a-zA-Z0-9-]+)?$/), launchAgentsDirectory: z.string() }).strict();
 export type RunnerConfig = z.infer<typeof RunnerConfig>;
 function absolute(path: string) { if (!isAbsolute(path)) throw new Error("Heartbeat paths must be absolute"); return path; }
-function localServiceUrl(value: string) {
-  const url = new URL(value);
-  if (!['127.0.0.1', '[::1]', 'localhost', '0.0.0.0', '[::]'].includes(url.hostname) || !['http:', 'https:'].includes(url.protocol)) throw new Error("Heartbeat requires a loopback service");
-  if (url.hostname === "0.0.0.0") url.hostname = "127.0.0.1";
-  if (url.hostname === "[::]") url.hostname = "[::1]";
-  return url.toString();
-}
 export async function heartbeatConnection(config: RunnerConfig) {
-  const registration = z.object({ url: z.string().url() }).parse(JSON.parse(await readFile(absolute(config.serviceFile), "utf8").catch(() => { throw new Error("Existing service registration unavailable; connect-only runner will not start it"); })));
-  localServiceUrl(registration.url);
-  const endpoint = await Service.discover({ file: absolute(config.serviceFile), version: "2.0.26" });
-  if (!endpoint) throw new Error("Existing compatible service unavailable; connect-only runner will not start it");
-  const baseUrl = localServiceUrl(endpoint.url);
-  const boundedFetch = Object.assign((input: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]) => fetch(input, { ...init, signal: AbortSignal.timeout(25_000) }), { preconnect: fetch.preconnect });
-  const client = OpenCode.make({ baseUrl, headers: Service.headers(endpoint), fetch: boundedFetch });
+  const endpoint = await heartbeatEndpoint(absolute(config.serviceFile));
+  const client = OpenCode.make({ baseUrl: endpoint.url, headers: Service.headers(endpoint), fetch: heartbeatFetch });
   const rpc = client.rpc(HeartbeatRpc);
   return { client, rpc };
 }

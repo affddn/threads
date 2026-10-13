@@ -8,6 +8,7 @@ import { themeColor, themeMuted } from "./activity-theme";
 import { Json } from "./workflow-types";
 import type { WorkflowRun, WorkflowSummary } from "./workflow-types";
 import { uiErrorMessage, uiState } from "./ui-location";
+import { snapshotEvent } from "./snapshot-events";
 
 const finished = new Set<WorkflowSummary["status"]>(["completed", "failed", "stopped"]);
 const sidebarRows = 5;
@@ -57,7 +58,7 @@ export function workflowUI(ctx: Plugin.Context, fallbackColor: RGBA) {
         const snapshot = await uiState(ctx, [context.ownerID], (location) => rpc.snapshot({ ownerID: context.ownerID }, { location, signal: abort.signal }));
         if (!isCurrent(context)) return;
         setRuns(snapshot.runs);
-        const id = selected()?.id;
+        const id = ctx.ui.panel.current()?.name === "threads.workflows" ? selected()?.id : undefined;
         if (id) {
           const run = await uiState(ctx, [context.ownerID], (location) => rpc.inspect({ ownerID: context.ownerID, runID: id }, { location, signal: abort.signal }));
           if (!isCurrent(context)) return;
@@ -292,10 +293,10 @@ export function workflowUI(ctx: Plugin.Context, fallbackColor: RGBA) {
     },
   });
   const stopEvents = ctx.data.listen(({ details }) => {
-    if (details.type.startsWith("session.") || details.type.startsWith("rpc.workflows.")) refreshInBackground();
+    if (snapshotEvent(details.type) || details.type.startsWith("rpc.workflows.")) refreshInBackground();
   });
   const timer = setInterval(() => {
-    if (ctx.ui.panel.current() || workflowProgressing(runs().map((run) => run.status)))
+    if (ctx.ui.panel.current()?.name === "threads.workflows" || workflowProgressing(runs().map((run) => run.status)))
       refreshInBackground();
   }, 3000);
   return {

@@ -43,25 +43,25 @@ test("actual SDK cycle records an apply conflict and still applies later monitor
   } finally { await server.stop(true); }
 });
 
-for (const hostname of ["0.0.0.0", "::"]) test(`connect-only runner accepts local unspecified bind ${hostname} with SDK PID/version/auth checks`, async () => {
+for (const hostname of ["127.0.0.1", "0.0.0.0", "::", "::1", "[::]", "[::1]", "localhost"]) test(`connect-only runner accepts native local bind ${hostname} with PID/version/auth checks`, async () => {
   const dir = await mkdtemp(join(tmpdir(), "heartbeat-bind-"));
   const serviceFile = join(dir, "service.json");
   let snapshots = 0;
   const snapshotHosts: string[] = [];
-  const server = Bun.serve({ hostname, port: 0, fetch(request) {
+  const server = Bun.serve({ hostname: hostname.replace(/[\[\]]/g, ""), port: 0, fetch(request) {
     if (request.headers.get("authorization") !== `Basic ${Buffer.from("opencode:local-fixture-only").toString("base64")}`) return new Response("Unauthorized", { status: 401 });
     if (new URL(request.url).pathname === "/api/info") return Response.json({ pid: process.pid, version: "2.0.26" });
     if (new URL(request.url).pathname.endsWith("/snapshot")) { snapshots++; snapshotHosts.push(new URL(request.url).hostname); return Response.json({ output: { protocol: 1, entries: [] } }); }
     return new Response("Unexpected request", { status: 500 });
   } });
-  const registration = { url: `http://${hostname === "::" ? "[::]" : hostname}:${server.port}`, pid: process.pid, version: "2.0.26", password: "local-fixture-only" };
+  const registration = { url: `http://${hostname}:${server.port}`, pid: process.pid, version: "2.0.26", password: "local-fixture-only" };
   const config = RunnerConfig.parse({ protocol: 1, serviceFile, hostDirectory: dir, node: process.execPath, runner: "/unused", intervalMs: 60_000, label: "com.opthreads.heartbeat.test", launchAgentsDirectory: dir });
   try {
     await writeFile(serviceFile, JSON.stringify(registration));
     const original = await readFile(serviceFile, "utf8");
     expect(await heartbeatOnce(config, false)).toEqual({ protocol: 1, shadow: false, decisions: [] });
     expect(snapshots).toBe(1);
-    expect(snapshotHosts).toEqual([hostname === "::" ? "[::1]" : "127.0.0.1"]);
+    expect(snapshotHosts).toEqual([hostname.includes("::") ? "[::1]" : hostname === "localhost" ? "localhost" : "127.0.0.1"]);
     expect(await readFile(serviceFile, "utf8")).toBe(original);
     for (const bad of [{ ...registration, pid: process.pid + 1 }, { ...registration, version: "incompatible" }, { ...registration, password: "wrong" }]) {
       await writeFile(serviceFile, JSON.stringify(bad));

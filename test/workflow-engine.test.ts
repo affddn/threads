@@ -297,12 +297,14 @@ return await agent("Inspect the durable state", {
 });`;
 
 async function settled(api: ReturnType<typeof workflowEngine>, ownerID: string, runID: string) {
+  let latest: WorkflowRun | undefined;
   for (let count = 0; count < 200; count++) {
     const run = await api.get(ownerID, runID);
+    latest = run;
     if (["completed", "failed", "stopped"].includes(run.status)) return run;
     await Bun.sleep(5);
   }
-  throw new Error("workflow did not settle");
+  throw new Error(`workflow did not settle: ${JSON.stringify({ runID, status: latest?.status, error: latest?.error, logs: latest?.logs.length, steps: latest?.steps.map((step) => ({ key: step.key, status: step.status })), limits: latest?.limits })}`);
 }
 
 async function reaches(api: ReturnType<typeof workflowEngine>, ownerID: string, runID: string, status: string) {

@@ -9,6 +9,7 @@ import { reportedTabAction } from "./src/activity-model";
 import { workInProgress } from "./src/idle";
 import { RGBA } from "@opentui/core";
 import { uiErrorMessage, uiState } from "./src/ui-location";
+import { snapshotEvent } from "./src/snapshot-events";
 
 const CoordinatorRef = z.object({ coordinatorID: z.string() });
 
@@ -146,7 +147,7 @@ export default Plugin.define({
       if (!stopped) list.openList();
     }
     const stopEvents = ctx.data.listen(({ details }) => {
-      if (details.type.startsWith("session.")) refresh();
+      if (snapshotEvent(details.type)) refresh();
     });
     const timer = setInterval(() => {
       if (

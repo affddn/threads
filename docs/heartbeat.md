@@ -42,7 +42,11 @@ The LaunchAgent runs `run` in a separate Node process, which polls every 60 seco
 
 A failed observation or apply is recorded for that monitor. The ticker continues with later monitors and pages; it does not retry an uncertain admission after a revision conflict.
 
-The pinned Promise client is `@opencode/client@2.0.7`. This implementation admits only an existing OpenCode `2.0.26` local service. Native wildcard bind addresses `0.0.0.0` and `[::]` map to loopback for heartbeat requests. SDK discovery probes the original registration and checks service identity and compatibility. Remote addresses and unsupported versions fail closed. The runner calls `Service.discover` and `Service.headers`, never `Service.ensure`, the `opencode api` command, or a service restart.
+The pinned Promise client is `@opencode/client@2.0.7`. This implementation admits only an existing OpenCode `2.0.26` local service. Each cycle reads the native registration and performs an authenticated health probe. The registered and live PID must match, both versions must be `2.0.26`, and the health response must succeed. Discovery requests have a two-second transport timeout; RPC requests have a 25-second timeout and preserve caller cancellation. Both reject redirects.
+
+Native wildcard bind addresses `0.0.0.0` and `[::]` map to loopback for heartbeat requests. OpenCode `2.0.26` can write unbracketed URLs such as `http://::1:<port>` or `http://:::<port>`. The runner brackets only these known local forms in memory. It leaves the registration file untouched and rejects remote, ambiguous, credential-bearing, and unsupported URLs. The host's formatting defect remains an OpenCode gap for other clients.
+
+The runner uses `Service.headers` and a local connect-only probe because the pinned SDK's `Service.discover` cannot accept an in-memory normalized endpoint. It never calls `Service.ensure`, the `opencode api` command, or a service restart.
 
 ## Holds and reconciliation
 
@@ -62,6 +66,6 @@ Focused tests cover unlimited monitoring beyond eight simulated days and 40 wake
 
 These checks do not prove atomic admission against concurrent human input, all crash points in native KV, or compatibility with other OpenCode versions. Full integrated engine, terminal, and independent reviewer gates remain separate from this isolated implementation.
 
-IPv6 wildcard handling has SDK-boundary coverage. A native attempt with `--hostname ::` still produced an IPv4 registration in the tested OpenCode build, so native IPv6 runner behavior remains unverified.
+Transport tests use real local HTTP listeners for bracketed and unbracketed IPv6, wildcard mapping, authentication, PID/version mismatch, outages, refreshed registration, redirect rejection, and unchanged registration bytes. The native IPv6 trial retains the same external Node PID across an isolated OpenCode restart and verifies both malformed registrations byte-for-byte. The unchanged host executable listens on `::1`; native `--hostname ::` may still advertise IPv4 on this version. HTTPS has no TLS fixture.
 
-Lifecycle checks exercise explicit task Location invalidation, graceful isolated restart, and actual Threads plugin reload. Automatic 60-minute Location eviction has not been observed in the native suite.
+Lifecycle checks exercise explicit task Location invalidation, graceful isolated restart, and actual Threads plugin reload. A separate long-running trial observed automatic Location eviction, but its original elapsed-time assertion failed after machine sleep. A timestamp-based replay and a later reminder trial passed separately. They do not establish a single uninterrupted end-to-end pass.

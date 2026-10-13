@@ -1,5 +1,6 @@
 import json
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 
@@ -10,6 +11,7 @@ class Provider:
         self.failed_once = set()
         self.cancelled = 0
         self.release = threading.Event()
+        self.streams = []
         provider = self
 
         class Handler(BaseHTTPRequestHandler):
@@ -29,6 +31,27 @@ class Provider:
                 ]
                 position, marker, selected = matches[-1] if matches else (-1, None, None)
                 tools = [message for message in messages[position + 1:] if message.get("role") == "tool"]
+                if selected and selected.get("stream"):
+                    schedule = selected["stream"]
+                    receipt = {"marker": marker, "started": time.monotonic(), "sent": 0, "chunks": schedule["chunks"], "interval": schedule["interval"]}
+                    provider.streams.append(receipt)
+                    self.send_response(200)
+                    self.send_header("Content-Type", "text/event-stream")
+                    self.end_headers()
+                    try:
+                        for index in range(schedule["chunks"]):
+                            chunk = {"id": "native-load", "object": "chat.completion.chunk", "model": "fixture", "choices": [{"index": 0, "delta": {"content": f"token{index} "}, "finish_reason": None}]}
+                            self.wfile.write(("data: " + json.dumps(chunk) + "\n\n").encode())
+                            self.wfile.flush()
+                            receipt["sent"] += 1
+                            time.sleep(schedule["interval"])
+                        self.wfile.write(('data: ' + json.dumps({"choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}], "usage": {"prompt_tokens": 20, "completion_tokens": schedule["chunks"], "total_tokens": 20 + schedule["chunks"]}}) + '\n\ndata: [DONE]\n\n').encode())
+                        self.wfile.flush()
+                    except (BrokenPipeError, ConnectionResetError):
+                        provider.cancelled += 1
+                    finally:
+                        receipt["finished"] = time.monotonic()
+                    return
                 if selected and (selected.get("error_always") or
                                  (selected.get("error_once_after_tool") and tools and marker not in provider.failed_once)):
                     provider.failed_once.add(marker)

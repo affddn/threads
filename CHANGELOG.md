@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Heartbeat requests normalize OpenCode's unbracketed local IPv6 registration URLs in memory, preserve exact version and PID checks, and reject redirects. Native registration files remain unchanged.
+- Streamed text, reasoning, tool input, compaction, step content and tool progress no longer trigger worker or workflow snapshots. Lifecycle and attention events still refresh immediately; progressing workflows and open workflow panels retain periodic freshness.
 - Add durable workflow heartbeat tools and a packaged, connect-only macOS runner. Optional wake caps and deadlines survive restarts and run replacement without replenishment.
 - New workflows have no built-in token, total-step, runtime, retry-attempt, or discovery-round budgets. Budgets are opt-in, and authoring guidance forbids agent-estimated limits. Existing runs retain their original limits and helper behavior.
 - Workflows notify their coordinator when a checkpoint needs a response or execution is interrupted. Durable receipts prevent duplicate notices after inspection or restart.

@@ -118,10 +118,12 @@ class Sandbox:
             path.write_text(re.sub(r"server password \S+", "server password [redacted]", path.read_text()))
 
     def await_plugin(self):
-        return eventually(lambda: any(
-            plugin["id"] == "op-threads" and plugin["state"]["status"] == "active"
-            for plugin in self.api("GET", "/api/plugin", location=self.directory)["data"]
-        ))
+        def active():
+            plugins = self.api("GET", "/api/plugin", location=self.directory)
+            (self.artifacts / "plugins.json").write_text(json.dumps(plugins, indent=2))
+            return any(plugin["id"] == "op-threads" and plugin["state"]["status"] == "active"
+                       for plugin in plugins["data"])
+        return eventually(active)
 
     def api(self, method, path, body=None, location=None):
         if location:
@@ -172,6 +174,17 @@ class Terminal:
     def wait_for_order(self, titles, timeout=40):
         pattern = re.compile(".*".join(map(re.escape, titles)), re.S)
         self.wait_for_match(lambda display: pattern.search(display), str(titles), timeout, True)
+
+    def drain(self, quiet=0.03, timeout=10):
+        # A text match may occur halfway through a frame, before its hit grid is ready.
+        last = time.monotonic()
+        def quiet_frame(_):
+            nonlocal last
+            if select.select([self.master], [], [], 0)[0]:
+                last = time.monotonic()
+                return False
+            return time.monotonic() - last >= quiet
+        self.wait_for_match(quiet_frame, "drained terminal frame", timeout, False)
 
     def wait_for_match(self, matches, description, timeout, left):
         deadline = time.monotonic() + timeout

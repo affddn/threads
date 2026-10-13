@@ -1,14 +1,14 @@
 #!/usr/bin/env node
 
 // src/heartbeat-runner.ts
-import { Service } from "@opencode/client/service";
+import { Service as Service2 } from "@opencode/client/service";
 import { OpenCode } from "@opencode/client";
-import { lstat, mkdir, open, readFile, realpath, rm, stat } from "node:fs/promises";
+import { lstat, mkdir, open, readFile as readFile2, realpath, rm, stat } from "node:fs/promises";
 import { dirname, isAbsolute, join } from "node:path";
 import { homedir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
-import { z as z5 } from "zod";
+import { z as z6 } from "zod";
 
 // src/heartbeat-rpc.ts
 import { Rpc as Rpc2 } from "@opencode/plugin/rpc";
@@ -407,34 +407,80 @@ function heartbeatProjectionDecision(record, run, observation, now) {
   return { kind: "wake", reason: "idle owner; stalled recorded progress" };
 }
 
+// src/heartbeat-transport.ts
+import { Service } from "@opencode/client/service";
+import { readFile } from "node:fs/promises";
+import { z as z5 } from "zod";
+var unavailable = "Existing compatible service unavailable; connect-only runner will not start it";
+var Registration = z5.object({
+  url: z5.string().transform((value, context) => {
+    const native = /^(https?:\/\/)(::1|::):([0-9]+)\/?$/.exec(value);
+    const normalized = native ? `${native[1]}[${native[2]}]:${native[3]}` : value;
+    if (!/^https?:\/\/(127\.0\.0\.1|0\.0\.0\.0|localhost|\[::1\]|\[::\])(?::[0-9]+)?\/?$/.test(normalized)) {
+      context.addIssue({ code: "custom", message: "Heartbeat requires an unambiguous loopback service" });
+      return z5.NEVER;
+    }
+    try {
+      const url = new URL(normalized);
+      if (url.port === "0")
+        throw new Error("Invalid port");
+      if (url.hostname === "0.0.0.0")
+        url.hostname = "127.0.0.1";
+      if (url.hostname === "[::]")
+        url.hostname = "[::1]";
+      return url.toString();
+    } catch {
+      context.addIssue({ code: "custom", message: "Heartbeat requires a valid loopback service" });
+      return z5.NEVER;
+    }
+  }),
+  pid: z5.number().int().positive(),
+  version: z5.literal("2.0.26"),
+  password: z5.string().optional()
+});
+var Info = z5.object({ pid: z5.number().int().positive(), version: z5.literal("2.0.26") });
+var heartbeatFetch = Object.assign((input, init) => fetch(input, { ...init, redirect: "error", signal: init?.signal ? AbortSignal.any([init.signal, AbortSignal.timeout(25000)]) : AbortSignal.timeout(25000) }), { preconnect: fetch.preconnect });
+async function heartbeatEndpoint(file) {
+  const text = await readFile(file, "utf8").catch(() => {
+    throw new Error("Existing service registration unavailable; connect-only runner will not start it");
+  });
+  let input;
+  try {
+    input = JSON.parse(text);
+  } catch {
+    throw new Error(unavailable);
+  }
+  const registration = Registration.safeParse(input);
+  if (!registration.success) {
+    if (registration.error.issues.some((issue) => issue.path[0] === "url"))
+      throw new Error("Heartbeat requires a valid unambiguous loopback service");
+    throw new Error(unavailable);
+  }
+  const { url, pid, password } = registration.data;
+  const endpoint = { url, auth: password === undefined ? undefined : { type: "basic", username: "opencode", password } };
+  try {
+    const response = await heartbeatFetch(new URL("/api/info", url), { headers: Service.headers(endpoint), signal: AbortSignal.timeout(2000) });
+    if (!response.ok)
+      throw new Error(unavailable);
+    const info = Info.parse(await response.json());
+    if (info.pid !== pid)
+      throw new Error(unavailable);
+    return endpoint;
+  } catch {
+    throw new Error(unavailable);
+  }
+}
+
 // src/heartbeat-runner.ts
-var RunnerConfig = z5.object({ protocol: z5.literal(1), serviceFile: z5.string(), hostDirectory: z5.string(), node: z5.string(), runner: z5.string(), intervalMs: z5.literal(60000), label: z5.string().regex(/^com\.opthreads\.heartbeat(?:\.[a-zA-Z0-9-]+)?$/), launchAgentsDirectory: z5.string() }).strict();
+var RunnerConfig = z6.object({ protocol: z6.literal(1), serviceFile: z6.string(), hostDirectory: z6.string(), node: z6.string(), runner: z6.string(), intervalMs: z6.literal(60000), label: z6.string().regex(/^com\.opthreads\.heartbeat(?:\.[a-zA-Z0-9-]+)?$/), launchAgentsDirectory: z6.string() }).strict();
 function absolute(path) {
   if (!isAbsolute(path))
     throw new Error("Heartbeat paths must be absolute");
   return path;
 }
-function localServiceUrl(value) {
-  const url = new URL(value);
-  if (!["127.0.0.1", "[::1]", "localhost", "0.0.0.0", "[::]"].includes(url.hostname) || !["http:", "https:"].includes(url.protocol))
-    throw new Error("Heartbeat requires a loopback service");
-  if (url.hostname === "0.0.0.0")
-    url.hostname = "127.0.0.1";
-  if (url.hostname === "[::]")
-    url.hostname = "[::1]";
-  return url.toString();
-}
 async function heartbeatConnection(config) {
-  const registration = z5.object({ url: z5.string().url() }).parse(JSON.parse(await readFile(absolute(config.serviceFile), "utf8").catch(() => {
-    throw new Error("Existing service registration unavailable; connect-only runner will not start it");
-  })));
-  localServiceUrl(registration.url);
-  const endpoint = await Service.discover({ file: absolute(config.serviceFile), version: "2.0.26" });
-  if (!endpoint)
-    throw new Error("Existing compatible service unavailable; connect-only runner will not start it");
-  const baseUrl = localServiceUrl(endpoint.url);
-  const boundedFetch = Object.assign((input, init) => fetch(input, { ...init, signal: AbortSignal.timeout(25000) }), { preconnect: fetch.preconnect });
-  const client = OpenCode.make({ baseUrl, headers: Service.headers(endpoint), fetch: boundedFetch });
+  const endpoint = await heartbeatEndpoint(absolute(config.serviceFile));
+  const client = OpenCode.make({ baseUrl: endpoint.url, headers: Service2.headers(endpoint), fetch: heartbeatFetch });
   const rpc = client.rpc(HeartbeatRpc);
   return { client, rpc };
 }
@@ -572,7 +618,7 @@ async function heartbeatCli(args = process.argv.slice(2)) {
       throw error;
     }
   }
-  const config = RunnerConfig.parse(JSON.parse(await readFile(configFile, "utf8")));
+  const config = RunnerConfig.parse(JSON.parse(await readFile2(configFile, "utf8")));
   if (command === "status") {
     const launcher = process.platform === "darwin" ? launchctl("print", `${domain}/${config.label}`) : { code: -1, stdout: "", stderr: "unsupported platform" };
     const observation = await heartbeatOnce(config, true).then((result) => ({ available: true, result }), (error) => ({ available: false, reason: String(error) }));

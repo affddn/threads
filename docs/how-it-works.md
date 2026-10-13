@@ -61,9 +61,13 @@ Each open tab makes OpenCode load that session's Location, including its MCP ser
 
 So Threads opens a worker's tab only when you choose the worker in the Threads list. A tab you open for an unreported worker closes after it reports, once you leave it.
 
-The terminal plugin also stays quiet while idle. It refreshes worker state after session events, and it polls every 3 seconds only while a tab is busy or needs input, or a known worker is running. Workflow state polls on the same interval only while a run can progress or the workflow panel is open. An idle terminal sends no Threads requests.
+The terminal plugin does not request snapshots for streamed text, reasoning, tool input, compaction deltas, step content, or tool progress. These events change conversation content, not worker reports or workflow journals. Session lifecycle and metadata events, permission requests, and forms still trigger refreshes.
+
+Worker state polls every 3 seconds only while a tab is busy or needs input, or a known worker is running. Workflow state polls on the same interval while a run can progress or the workflow panel is open. This polling also finds journal updates that emit no session event. A closed workflow panel does not inspect its previously selected run, and another plugin's panel does not keep finished workflow lists polling. Explicit commands and workflow RPC updates still request fresh state.
 
 OpenCode itself still refreshes catalogs for any Location that starts while a terminal is connected, including a worker's. Threads can't prevent that. The [verification record](workflows-verification.md#loaded-locations) has the measurements.
+
+Filtering stream events reduces snapshot requests, but each remaining workflow snapshot still scans saved journals. Waiting checkpoints also poll once per second. A native comparison with 120 saved runs reduced workflow snapshots from 131–135 to 7–9 per streaming window. Journal reads remained, and health latency was too noisy to establish a statistically significant improvement. These measurements do not establish the cause of earlier service timeouts.
 
 ## Crashes and restarts
 
