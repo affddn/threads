@@ -1,6 +1,8 @@
 # Changelog
 
-## Unreleased
+## 0.3.0
+
+Requires OpenCode 2.0.28. It fails to load on OpenCode 2.0.26 and earlier, which ship an older Effect runtime; use 0.2.8 there.
 
 - Update OpenCode dependencies to `2.0.28` and Effect to `4.0.1` so Threads loads with the host's stable Effect runtime. Heartbeat accepts `2.0.28` as well as `2.0.26`, with matching registered and live versions required.
 - Fresh workflow workers wait for their task after a worktree move. An earlier native idle outcome no longer causes a false write interruption.
