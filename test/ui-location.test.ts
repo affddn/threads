@@ -1,6 +1,7 @@
 import { expect, test } from "bun:test";
+import { ClientError } from "@opencode/client/promise";
 import type { Plugin } from "@opencode/plugin/tui";
-import { applyWorkerSnapshot, uiErrorMessage, uiState } from "../src/ui-location";
+import { applyWorkerSnapshot, transportGrace, uiErrorMessage, uiState } from "../src/ui-location";
 
 function context(focused: string | undefined, fallback: string, sessions: Record<string, string> = {}) {
   return {
@@ -87,4 +88,31 @@ test("failed snapshot routing leaves cached memberships intact", async () => {
     applyWorkerSnapshot(cache, ["A"], values);
   } catch {}
   expect([...cache.values()]).toEqual([worker]);
+});
+
+test("background transport failures are reported only after the grace period", () => {
+  let clock = 0;
+  const grace = transportGrace(15_000, () => clock);
+  const dropped = new ClientError("Transport", { cause: new Error("The socket connection was closed unexpectedly.") });
+  expect(dropped.message).toBe("Transport: The socket connection was closed unexpectedly.");
+  expect(grace.shouldReport(dropped)).toBe(false);
+  clock = 14_999;
+  expect(grace.shouldReport(dropped)).toBe(false);
+  clock = 15_000;
+  expect(grace.shouldReport(dropped)).toBe(true);
+  grace.clear();
+  clock = 20_000;
+  expect(grace.shouldReport(dropped)).toBe(false);
+});
+
+test("non-transport failures are reported immediately and restart the transport grace", () => {
+  let clock = 0;
+  const grace = transportGrace(15_000, () => clock);
+  const dropped = new ClientError("Transport");
+  for (const error of [new ClientError("UnexpectedStatus", { detail: "500" }), missing("/gone"), new Error("Transport: lookalike"), "Transport"])
+    expect(grace.shouldReport(error)).toBe(true);
+  expect(grace.shouldReport(dropped)).toBe(false);
+  clock = 15_000;
+  expect(grace.shouldReport(new Error("Request failed"))).toBe(true);
+  expect(grace.shouldReport(dropped)).toBe(false);
 });

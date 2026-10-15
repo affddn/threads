@@ -43,6 +43,8 @@ export async function refreshHarness(savedRuns = 0) {
   const commands = new Map<string, () => unknown>();
   const slots: (() => unknown)[] = [];
   const errors: unknown[] = [];
+  let workerFailure: unknown;
+  let holdWorkers: (() => unknown) | undefined;
   const ctx = {
     client: {
       rpc: (definition: { id: string }) => definition.id === "workflows" ? {
@@ -57,7 +59,15 @@ export async function refreshHarness(savedRuns = 0) {
           return run;
         },
       } : {
-        snapshot: async () => { counts.workerSnapshots++; return { workers: [] }; },
+        snapshot: async (_input: unknown, options?: { signal?: AbortSignal }) => {
+          counts.workerSnapshots++;
+          if (holdWorkers) {
+            const abort = holdWorkers;
+            await new Promise((_, reject) => options?.signal?.addEventListener("abort", () => reject(abort()), { once: true }));
+          }
+          if (workerFailure !== undefined) throw workerFailure;
+          return { workers: [] };
+        },
         restore: async () => ({ workers: [] }),
       },
       session: { list: async () => ({ data: [] }), get: async () => undefined },
@@ -89,6 +99,8 @@ export async function refreshHarness(savedRuns = 0) {
     owner: (id: string) => { owner = id; },
     panel: (name?: string) => { panel = name ? { name, sessionID: owner } : undefined; },
     command: (id: string) => commands.get(id)?.(),
+    failWorkerSnapshots: (error?: unknown) => { workerFailure = error; },
+    holdWorkerSnapshots: (abortError?: () => unknown) => { holdWorkers = abortError; },
     dispose: () => { if (typeof dispose === "function") dispose(); },
   };
 }

@@ -13,7 +13,7 @@ import { ThreadsIndicator } from "./activity-footer";
 import { ActivityPicker } from "./activity-picker";
 import { workInProgress } from "./idle";
 import { ThreadsRpc, WorkerView } from "./rpc";
-import { applyWorkerSnapshot, uiState } from "./ui-location";
+import { applyWorkerSnapshot, transportGrace, uiState } from "./ui-location";
 import { snapshotEvent } from "./snapshot-events";
 
 type Session = NonNullable<
@@ -58,6 +58,7 @@ export function activity(
   let stopped = false;
   let loading = false;
   let lastError: string | undefined;
+  const transport = transportGrace();
   const changed = () => {
     if (!stopped) setRevision((value) => value + 1);
   };
@@ -319,8 +320,15 @@ export function activity(
         if (!worker.hidden && !ctx.data.session.get(worker.workerID))
           await resolveSession(worker.workerID);
       lastError = undefined;
+      transport.clear();
     } catch (value) {
-      error(value);
+      if (stopped) return;
+      if (transport.shouldReport(value)) error(value);
+      else
+        refreshTimer ??= setTimeout(() => {
+          refreshTimer = undefined;
+          void load();
+        }, 2000);
     } finally {
       loading = false;
       changed();

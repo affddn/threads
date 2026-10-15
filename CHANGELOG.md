@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Background worker-tab and Threads list refreshes no longer show a toast when an OpenCode service restart drops the connection. They retry every two seconds and report a transport failure only after it lasts 15 seconds. Other errors and failures from commands you run are still reported immediately.
+
 ## 0.3.0
 
 Requires OpenCode 2.0.28. It fails to load on OpenCode 2.0.26 and earlier, which ship an older Effect runtime; use 0.2.8 there.

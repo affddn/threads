@@ -8,7 +8,7 @@ import { workflowUI } from "./src/workflow-ui";
 import { reportedTabAction } from "./src/activity-model";
 import { workInProgress } from "./src/idle";
 import { RGBA } from "@opentui/core";
-import { uiErrorMessage, uiState } from "./src/ui-location";
+import { transportGrace, uiErrorMessage, uiState } from "./src/ui-location";
 import { snapshotEvent } from "./src/snapshot-events";
 
 const CoordinatorRef = z.object({ coordinatorID: z.string() });
@@ -31,6 +31,8 @@ export default Plugin.define({
     let running = false;
     let refreshPending = false;
     let lastError: string | undefined;
+    const transport = transportGrace();
+    let retry: ReturnType<typeof setTimeout> | undefined;
     let known: string[] = [];
     function trackedCoordinatorIDs() {
       const route = ctx.ui.router.current();
@@ -106,7 +108,16 @@ export default Plugin.define({
             closing.add(worker.workerID);
         }
         lastError = undefined;
+        transport.clear();
       } catch (error) {
+        if (stopped) return;
+        if (!transport.shouldReport(error)) {
+          retry ??= setTimeout(() => {
+            retry = undefined;
+            refresh();
+          }, 2000);
+          return;
+        }
         const message = `Managed worker tabs: ${uiErrorMessage(error)}`;
         if (!stopped && message !== lastError)
           ctx.ui.toast.show({ message, variant: "error" });
@@ -186,6 +197,7 @@ export default Plugin.define({
       abort.abort();
       list.dispose();
       clearInterval(timer);
+      clearTimeout(retry);
       stopEvents();
       removeSlot();
     };

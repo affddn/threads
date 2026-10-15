@@ -18,6 +18,27 @@ export function uiErrorMessage(error: unknown): string {
   return String(error);
 }
 
+const TransportFailure = z.object({ name: z.literal("ClientError"), reason: z.literal("Transport") });
+
+// A shared-service restart drops in-flight requests, so one background refresh fails and a
+// later one reconnects. Background refreshes report a transport failure only once it lasts.
+export function transportGrace(graceMs = 15_000, now = Date.now) {
+  let since: number | undefined;
+  return {
+    clear() {
+      since = undefined;
+    },
+    shouldReport(error: unknown) {
+      if (!TransportFailure.safeParse(error).success) {
+        since = undefined;
+        return true;
+      }
+      since ??= now();
+      return now() - since >= graceMs;
+    },
+  };
+}
+
 // Global UI state can be read from another observed Location. Mutations that use
 // the directory (workflow control/save) must keep their original routing.
 export async function uiState<T>(
