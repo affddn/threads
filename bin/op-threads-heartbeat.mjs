@@ -231,6 +231,15 @@ var WorkflowSettlement = z3.discriminatedUnion("kind", [
   z3.object({ kind: z3.literal("agent"), key: z3.string(), outcome: z3.enum(["success", "failure"]), error: z3.string().optional() }),
   z3.object({ kind: z3.literal("checkpoint"), key: z3.string(), response: Json })
 ]);
+var WorktreeKeptReason = z3.enum(["changes", "commits", "nested", "in-use", "unregistered", "error"]);
+var WorkflowWorktreeOutcome = z3.object({
+  key: z3.string(),
+  directory: z3.string(),
+  outcome: z3.enum(["removed", "kept", "missing"]),
+  reason: WorktreeKeptReason.optional(),
+  message: z3.string().optional(),
+  at: z3.number()
+});
 var WorkflowRun = z3.object({
   version: z3.literal(1),
   helperPolicy: z3.enum(["legacy-bounded", "optional-counts"]).default("legacy-bounded"),
@@ -255,6 +264,7 @@ var WorkflowRun = z3.object({
   }).optional(),
   created: z3.number(),
   updated: z3.number(),
+  finished: z3.number().optional(),
   phase: z3.string(),
   steps: z3.array(WorkflowStep),
   logs: z3.array(z3.object({ time: z3.number(), text: z3.string() })),
@@ -268,9 +278,31 @@ var WorkflowRun = z3.object({
   result: Json.optional(),
   error: z3.string().optional(),
   deliveryID: z3.string(),
-  delivered: z3.boolean()
+  delivered: z3.boolean(),
+  worktreeCleanup: z3.object({
+    complete: z3.boolean(),
+    worktrees: z3.array(WorkflowWorktreeOutcome)
+  }).optional()
 });
-var WorkflowSummary = WorkflowRun.omit({ script: true, args: true, result: true, steps: true, logs: true, checkpoints: true, settlements: true, attention: true, fingerprint: true, callerAgent: true, deliveryID: true, delivered: true }).extend({
+var WorkflowPrune = z3.object({
+  apply: z3.boolean().default(false),
+  olderThanDays: z3.number().min(0).max(3650).optional()
+}).strict();
+var WorkflowPruneEntry = z3.object({
+  runID: z3.string(),
+  runStatus: WorkflowRun.shape.status,
+  key: z3.string(),
+  directory: z3.string(),
+  outcome: z3.enum(["removed", "would-remove", "kept"]),
+  reason: z3.enum([...WorktreeKeptReason.options, "unfinished"]).optional(),
+  message: z3.string().optional()
+});
+var WorkflowPruneResult = z3.object({
+  applied: z3.boolean(),
+  worktrees: z3.array(WorkflowPruneEntry),
+  counts: z3.object({ removed: z3.number(), wouldRemove: z3.number(), kept: z3.number() })
+});
+var WorkflowSummary = WorkflowRun.omit({ script: true, args: true, result: true, steps: true, logs: true, checkpoints: true, settlements: true, attention: true, fingerprint: true, callerAgent: true, deliveryID: true, delivered: true, worktreeCleanup: true }).extend({
   counts: z3.object({ completed: z3.number(), running: z3.number(), failed: z3.number(), total: z3.number() }),
   usage: WorkflowUsage
 });

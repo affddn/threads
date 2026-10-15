@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.3.2
 
 - When a workflow run completes, fails, or stops, Threads removes each step worktree that has no uncommitted or untracked changes and whose commits a branch, tag, or remote contains. It runs `git worktree remove` without `--force` and never deletes branches. Shared steps, runs that can still resume, checkouts that contain another worktree, and checkouts where a worker is still running keep their directories. The run's new `worktreeCleanup` field records what was removed and kept, and why. Cleanup starts after the result is recorded and can't change it.
 - A workflow step can no longer be recorded in a checkout while cleanup removes it. A step whose checkout is already gone fails with a clear error.
