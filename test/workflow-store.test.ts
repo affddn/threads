@@ -116,6 +116,31 @@ test("list skips a corrupt sibling without hiding healthy runs or replacing evid
   expect(JSON.parse(await readFile(corruptPath, "utf8"))).toEqual(corrupt);
 });
 
+test("records without cleanup fields load, cleanup outcomes round-trip, and all() spans owners", async () => {
+  const fixture = await disk();
+  const legacy = { ...run("legacy"), status: "completed", delivered: true } as Record<string, unknown>;
+  expect("finished" in legacy || "worktreeCleanup" in legacy).toBe(false);
+  await writeFile(fixture.path("workflows/runs/legacy"), JSON.stringify(legacy));
+  await writeFile(fixture.path("workflows/runs/corrupt"), JSON.stringify({ ...run("corrupt"), version: 99 }));
+  const store = workflowStore(fixture.storage);
+  await store.create(run("other", "owner-b"));
+  const loaded = await store.get("legacy");
+  expect(loaded.finished).toBeUndefined();
+  expect(loaded.worktreeCleanup).toBeUndefined();
+  const outcome = { key: "write", directory: "/fixture/.opencode-workflows/workflow-x", outcome: "kept" as const, reason: "changes" as const, message: "dirty", at: 5 };
+  await store.update("legacy", (draft) => {
+    draft.finished = 4;
+    draft.worktreeCleanup = { complete: true, worktrees: [outcome] };
+  }, "control");
+  const reopened = await workflowStore(fixture.storage).get("legacy");
+  expect(reopened.finished).toBe(4);
+  expect(reopened.worktreeCleanup).toEqual({ complete: true, worktrees: [outcome] });
+  expect("worktreeCleanup" in workflowSummary(reopened)).toBe(false);
+  expect(workflowSummary(reopened).finished).toBe(4);
+  expect((await store.all()).map((item) => item.id).sort()).toEqual(["legacy", "other"]);
+  expect((await store.list("owner-a")).map((item) => item.id)).toEqual(["legacy"]);
+});
+
 test("fingerprints are independent of object insertion order and preserve array order", () => {
   expect(workflowHash({ b: 2, a: { z: 1, y: 2 } })).toBe(workflowHash({ a: { y: 2, z: 1 }, b: 2 }));
   expect(workflowHash(["a", "b"])).not.toBe(workflowHash(["b", "a"]));

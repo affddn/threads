@@ -3,6 +3,7 @@ import type { Plugin } from "@opencode/plugin";
 import { Session } from "@opencode/schema/session";
 import { SessionMessage } from "@opencode/schema/session-message";
 import Ajv from "ajv";
+import type { z } from "zod";
 import { parseWorkflow, executeWorkflow, type WorkflowHost } from "./workflow-runtime";
 import { withResolvedGrants } from "./external-access";
 import { requireDelegation } from "./permissions";
@@ -16,16 +17,20 @@ import {
   watchWorkflowExecution,
 } from "./threads";
 import { workflowHash, workflowStore } from "./workflow-store";
+import { inspectCheckout, isDirectory, withCheckouts, worktreeSteps, worktreeSweeper, type InspectCheckout } from "./workflow-cleanup";
 import {
   Json,
   WORKFLOW_DIAGNOSTIC_JSON_BYTES,
   WORKFLOW_SETTLEMENT_DIAGNOSTIC_JSON_BYTES,
   WorkflowAgentInput,
+  WorkflowPrune,
   WorkflowResult,
   WorkflowRun,
   WorkflowSettlement,
   WorkflowStart,
+  type WorkflowPruneResult,
   type WorkflowStep,
+  type WorkflowWorktreeOutcome,
   type WorkflowSettlement as Settlement,
 } from "./workflow-types";
 import {
@@ -60,6 +65,7 @@ const completionKey = (runID: string) => `workflows/completions/${runID}`;
 const terminal = new Set(["stopped", "failed", "completed"]);
 const activeStatus = new Set(["running", "pausing", "stopping", "waiting"]);
 const settlementLimit = 16 * 1024 * 1024;
+const cleanupDisposeLimit = 2_000;
 const bounded = (text: string, length = 20_000) => text.length <= length ? text : `${text.slice(0, length)}\n…[truncated]`;
 const boundedBytes = (text: string, limit: number) => {
   if (Buffer.byteLength(JSON.stringify(text), "utf8") - 2 <= limit) return text;
@@ -156,8 +162,15 @@ function usage(session: Awaited<ReturnType<Plugin.Context["session"]["get"]>>) {
 export function workflowEngine(
   ctx: Plugin.Context,
   workers: Threads,
-  options: { maxWorkers?: number; loadSaved?: (name: string) => Promise<string>; warmWorker?: (workerID: string) => Promise<void> } = {},
+  options: {
+    maxWorkers?: number;
+    loadSaved?: (name: string) => Promise<string>;
+    warmWorker?: (workerID: string) => Promise<void>;
+    cleanupWorktrees?: boolean;
+    inspectCheckout?: InspectCheckout;
+  } = {},
 ) {
+  const cleanupWorktrees = options.cleanupWorktrees ?? true;
   const diagnosed = new Set<string>();
   async function diagnose(issue: { id: string; ownerID: string; message: string }) {
     const message = errorText(issue.message);
@@ -195,6 +208,13 @@ export function workflowEngine(
           run.attention ??= { checkpoints: [], interruption: 0, deliveredInterruption: 0 };
           run.attention.interruption++;
         }
+        // Runs that ended before cleanup existed, or while it was off, are left for workflows_prune.
+        if (terminal.has(run.status) && !terminal.has(previous)) {
+          run.finished ??= Date.now();
+          if (cleanupWorktrees && run.worktreeCleanup === undefined && worktreeSteps(run).length > 0) {
+            run.worktreeCleanup = { complete: false, worktrees: [] };
+          }
+        }
       }, kind);
     },
   };
@@ -202,6 +222,9 @@ export function workflowEngine(
   if (!Number.isSafeInteger(maxWorkers) || maxWorkers < 1) throw new Error("maxWorkers must be a positive integer");
   const ajv = new Ajv({ allErrors: true, strict: false });
   const recoveredOwners = new Set<string>();
+  const cleanupAttempts = new Set<string>();
+  const cleanups = new Map<string, Promise<void>>();
+  const cleanupStop = new AbortController();
   const engineOwner = Symbol("workflow-engine");
   let disposed = false;
 
@@ -221,6 +244,14 @@ export function workflowEngine(
   }
 
   async function deliver(runID: string) {
+    try {
+      return await deliverOnce(runID);
+    } finally {
+      cleanupLater(runID);
+    }
+  }
+
+  async function deliverOnce(runID: string) {
     return serialized(`workflow-delivery:${runID}`, async () => {
       const run = await store.get(runID);
       if (!terminal.has(run.status) || run.delivered) return run;
@@ -287,8 +318,70 @@ export function workflowEngine(
       await attend(run.id);
       if (terminal.has(run.status) && !run.delivered) {
         await deliver(run.id).catch((error) => diagnose({ id: run.id, ownerID, message: errorText(error) }));
+      } else if (terminal.has(run.status) && run.worktreeCleanup?.complete === false) {
+        cleanupLater(run.id);
       }
     }
+  }
+
+  // Runs after the final status is recorded and never changes it. Each engine tries a run once;
+  // per-worktree records let a restarted engine continue an interrupted pass.
+  function cleanupLater(runID: string) {
+    if (!cleanupWorktrees || disposed || cleanupAttempts.has(runID)) return;
+    cleanupAttempts.add(runID);
+    const task = cleanRun(runID).catch(() => {}).finally(() => cleanups.delete(runID));
+    cleanups.set(runID, task);
+  }
+
+  async function recordWorktrees(runID: string, outcomes: WorkflowWorktreeOutcome[], complete?: boolean) {
+    return store.update(runID, (current) => {
+      current.finished ??= current.updated;
+      const record = current.worktreeCleanup ??= { complete: true, worktrees: [] };
+      for (const outcome of outcomes) {
+        const index = record.worktrees.findIndex((entry) => entry.key === outcome.key);
+        if (index >= 0) record.worktrees[index] = outcome;
+        else record.worktrees.push(outcome);
+      }
+      if (complete !== undefined) record.complete = complete;
+    }, "control");
+  }
+
+  // Every project's runs: a granted step can use another project's checkout. Finished runs gain no
+  // steps, so one snapshot serves a pass. Other runs are reread for each checkout.
+  function relatedRuns() {
+    let since = 0;
+    let finished: Promise<WorkflowRun[]> | undefined;
+    return async () => {
+      if (!finished) {
+        since = Date.now();
+        finished = store.all((raw) => terminal.has(String(raw.status)));
+      }
+      const fresh = await store.all((raw) => !terminal.has(String(raw.status)) || (typeof raw.updated === "number" && raw.updated >= since));
+      const reread = new Set(fresh.map((run) => run.id));
+      return [...fresh, ...(await finished).filter((run) => !reread.has(run.id))];
+    };
+  }
+
+  async function cleanRun(runID: string) {
+    await serialized(`workflow-cleanup:${runID}`, async () => {
+      const run = await store.get(runID);
+      if (!terminal.has(run.status) || run.worktreeCleanup?.complete !== false) return;
+      const recorded = new Set(run.worktreeCleanup.worktrees.map((entry) => entry.key));
+      const sweep = worktreeSweeper(ctx, options.inspectCheckout ?? inspectCheckout, relatedRuns(), { signal: cleanupStop.signal });
+      for (const step of worktreeSteps(run)) {
+        if (disposed) return;
+        if (recorded.has(step.key)) continue;
+        const result = await sweep(run, step, true);
+        if (disposed && result.outcome !== "removed") return;
+        const { outcome, reason, message } = result;
+        if (outcome === "would-remove") continue;
+        await recordWorktrees(runID, [{
+          key: step.key, directory: step.directory, outcome,
+          ...(reason === undefined ? {} : { reason }), ...(message === undefined ? {} : { message }), at: Date.now(),
+        }]);
+      }
+      if (!disposed) await recordWorktrees(runID, [], true);
+    });
   }
 
   async function attend(runID: string) {
@@ -485,28 +578,31 @@ export function workflowEngine(
           permissions: sourceProfile.data.permissions,
           system: sourceProfile.data.system ?? null,
         });
-        run = await store.update(runID, (current) => {
-          const existing = current.steps.find((step) => step.key === key);
-          if (existing) {
-            if (existing.fingerprint !== requestFingerprint) throw new Error(`Workflow key ${key} was resumed with different input; use a new run key`);
-            return;
-          }
-          if (current.limits.maxAgents !== null && current.steps.length >= current.limits.maxAgents) throw new Error(`Workflow agent limit reached (${current.limits.maxAgents})`);
-          const plan = workflowDirectoryPlan(current, directoryInput, key);
-          const spawnKey = `workflow:${current.id}:${key}`;
-          current.steps.push({
-            status: "prepared",
-            key,
-            fingerprint: requestFingerprint,
-            index: current.steps.reduce((maximum, step) => Math.max(maximum, step.index), -1) + 1,
-            input,
-            workerID: workerIdentity(current.ownerID, spawnKey),
-            spawnKey,
-            created: Date.now(),
-            phase: input.phase ?? current.phase,
-            directory: plan.directory,
-            model: sourceModel,
-            profileFingerprint: `pending:${sourceProfileFingerprint}`,
+        run = await withCheckouts([source], async () => {
+          if (!await isDirectory(source)) throw new Error(`Workflow directory ${source} no longer exists`);
+          return store.update(runID, (current) => {
+            const existing = current.steps.find((step) => step.key === key);
+            if (existing) {
+              if (existing.fingerprint !== requestFingerprint) throw new Error(`Workflow key ${key} was resumed with different input; use a new run key`);
+              return;
+            }
+            if (current.limits.maxAgents !== null && current.steps.length >= current.limits.maxAgents) throw new Error(`Workflow agent limit reached (${current.limits.maxAgents})`);
+            const plan = workflowDirectoryPlan(current, directoryInput, key);
+            const spawnKey = `workflow:${current.id}:${key}`;
+            current.steps.push({
+              status: "prepared",
+              key,
+              fingerprint: requestFingerprint,
+              index: current.steps.reduce((maximum, step) => Math.max(maximum, step.index), -1) + 1,
+              input,
+              workerID: workerIdentity(current.ownerID, spawnKey),
+              spawnKey,
+              created: Date.now(),
+              phase: input.phase ?? current.phase,
+              directory: plan.directory,
+              model: sourceModel,
+              profileFingerprint: `pending:${sourceProfileFingerprint}`,
+            });
           });
         });
         let previous = run.steps.find((step) => step.key === key)!;
@@ -1095,7 +1191,7 @@ export function workflowEngine(
         settlements: [],
         deliveryID: deliveryIdentity(id), delivered: false,
       });
-      const admitted = await store.create(run);
+      const admitted = await withCheckouts([run.directory], () => store.create(run));
       if (admitted.fingerprint !== fingerprint) throw new Error("This workflow key belongs to a different request");
       if (admitted === run) launch(id, runtime);
       return store.get(id);
@@ -1107,6 +1203,44 @@ export function workflowEngine(
     async list(ownerID: string) {
       await recover(ownerID);
       return store.list(ownerID);
+    },
+    // Project-wide: a finished run has no controller left, and only checkouts that lose nothing are removed.
+    async prune(sessionID: string, raw: z.input<typeof WorkflowPrune>): Promise<WorkflowPruneResult> {
+      const input = WorkflowPrune.parse(raw);
+      const caller = await ctx.session.get({ sessionID });
+      if (caller.parentID !== undefined || caller.metadata?.opThreads !== undefined) throw new Error("Only a root session may prune workflow worktrees");
+      const runs = await store.all((raw) => raw.projectID === caller.projectID);
+      const cutoff = input.olderThanDays === undefined ? undefined : Date.now() - input.olderThanDays * 86_400_000;
+      const sweep = worktreeSweeper(ctx, options.inspectCheckout ?? inspectCheckout, relatedRuns(), { occupied: [caller.location.directory] });
+      const worktrees: WorkflowPruneResult["worktrees"] = [];
+      for (const run of runs) {
+        if (cutoff !== undefined && (run.finished ?? run.updated) > cutoff) continue;
+        const steps = worktreeSteps(run);
+        if (steps.length === 0) continue;
+        if (!terminal.has(run.status)) {
+          for (const step of steps) {
+            if (!await isDirectory(step.directory)) continue;
+            worktrees.push({
+              runID: run.id, runStatus: run.status, key: step.key, directory: step.directory, outcome: "kept", reason: "unfinished",
+              message: `Workflow is ${run.status} and can still use this worktree. Its owner can stop it to finish it.`,
+            });
+          }
+          continue;
+        }
+        await serialized(`workflow-cleanup:${run.id}`, async () => {
+          const outcomes: WorkflowWorktreeOutcome[] = [];
+          for (const step of steps) {
+            const { outcome, reason, message } = await sweep(run, step, input.apply);
+            if (outcome === "missing") continue;
+            const detail = { ...(reason === undefined ? {} : { reason }), ...(message === undefined ? {} : { message }) };
+            worktrees.push({ runID: run.id, runStatus: run.status, key: step.key, directory: step.directory, outcome, ...detail });
+            if (input.apply && outcome !== "would-remove") outcomes.push({ key: step.key, directory: step.directory, outcome, ...detail, at: Date.now() });
+          }
+          if (outcomes.length > 0) await recordWorktrees(run.id, outcomes).catch(() => {});
+        });
+      }
+      const count = (outcome: WorkflowPruneResult["worktrees"][number]["outcome"]) => worktrees.filter((entry) => entry.outcome === outcome).length;
+      return { applied: input.apply, worktrees, counts: { removed: count("removed"), wouldRemove: count("would-remove"), kept: count("kept") } };
     },
     async control(ownerID: string, input: Control) {
       let checkpointReply: { key: string; response: Json } | undefined;
@@ -1222,6 +1356,9 @@ export function workflowEngine(
     },
     async dispose() {
       disposed = true;
+      // First, so a pass holding a lock that an active run waits on lets go. An unfinished pass keeps
+      // an incomplete record, which the next engine continues.
+      cleanupStop.abort(new Error("Workflow engine disposed"));
       const pending: Promise<void>[] = [];
       for (const [runID, lease] of leases) {
         if (lease.owner !== engineOwner) continue;
@@ -1235,6 +1372,7 @@ export function workflowEngine(
         pending.push(lease.promise.catch(() => {}));
       }
       await Promise.all(pending);
+      await Promise.race([Promise.all(cleanups.values()), Bun.sleep(cleanupDisposeLimit)]);
     },
   };
 }

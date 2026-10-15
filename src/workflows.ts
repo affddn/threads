@@ -9,7 +9,7 @@ import { heartbeat } from "./heartbeat";
 import { workflowEngine } from "./workflow-engine";
 import { WorkflowControl, WorkflowsRpc } from "./workflow-rpc";
 import { savedWorkflows, SavedWorkflow } from "./workflow-saved";
-import { WorkflowLimits, WorkflowResult, WorkflowRun, WorkflowStart, WorkflowSummary, workflowSummary } from "./workflow-types";
+import { WorkflowLimits, WorkflowPrune, WorkflowPruneResult, WorkflowResult, WorkflowRun, WorkflowStart, WorkflowSummary, workflowSummary } from "./workflow-types";
 
 export async function workflows(
   ctx: Plugin.Context,
@@ -19,6 +19,7 @@ export async function workflows(
 ) {
   const concurrency = WorkflowLimits.shape.concurrency.parse(ctx.options.workflowConcurrency);
   const maxAgents = WorkflowStart.shape.maxAgents.parse(ctx.options.workflowMaxAgents);
+  const cleanupWorktrees = z.boolean().default(true).parse(ctx.options.workflowWorktreeCleanup);
   const startInput = WorkflowStart.safeExtend({
     concurrency: WorkflowLimits.shape.concurrency.default(concurrency),
     maxAgents: WorkflowStart.shape.maxAgents.default(maxAgents),
@@ -26,6 +27,7 @@ export async function workflows(
   const saved = savedWorkflows(ctx.location.directory, ctx.location.project.canonical);
   const engine = workflowEngine(ctx, workers, {
     maxWorkers,
+    cleanupWorktrees,
     loadSaved: (name: string) => saved.load(name),
     warmWorker: (sessionID: string) => ctx.session.command({ sessionID, name: "workflow-refresh", text: "" }),
   });
@@ -96,6 +98,17 @@ export async function workflows(
         const run = await engine.control(tool.sessionID, input);
         await rpc.events.emit("updated", { ownerID: tool.sessionID, runID: run.id });
         const output = workflowSummary(run);
+        return { content: JSON.stringify(output), output };
+      },
+    });
+    editor.add({
+      name: "prune",
+      description: "List step worktrees left by finished workflow runs in this project, and remove them with apply: true. Dry run by default; it changes nothing. Apply removes only checkouts without uncommitted or untracked changes, whose commits a branch, tag, or remote contains, and that hold no other worktree or running worker. It never forces removal or deletes branches, run records, or sessions. Worktrees of active, paused, waiting, or interrupted runs are kept. olderThanDays limits it to runs that finished at least that many days ago.",
+      input: WorkflowPrune,
+      output: WorkflowPruneResult,
+      options: { namespace: "workflows", codemode: false, permission: "edit" },
+      execute: async (input, tool) => {
+        const output = await engine.prune(tool.sessionID, input);
         return { content: JSON.stringify(output), output };
       },
     });

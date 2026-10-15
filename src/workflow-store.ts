@@ -99,5 +99,22 @@ export function workflowStore(storage: Plugin.Context["storage"], options: {
       } while (after);
       return runs.sort((a, b) => b.created - a.created);
     },
+    // Every owner's readable runs that `include` selects before parsing. Corrupt records are
+    // reported through their owner's list.
+    async all(include: (raw: { status?: unknown; projectID?: unknown; updated?: unknown }) => boolean = () => true) {
+      const runs: WorkflowRun[] = [];
+      let after: string | undefined;
+      do {
+        const page = await storage.scan({ prefix: "workflows/runs/", after, limit: 100 });
+        for (const entry of page.entries) {
+          const raw = entry.value;
+          if (typeof raw !== "object" || raw === null || !include(raw as { status?: unknown; projectID?: unknown; updated?: unknown })) continue;
+          const parsed = WorkflowRun.safeParse(raw);
+          if (parsed.success) runs.push(parsed.data);
+        }
+        after = page.next;
+      } while (after);
+      return runs.sort((a, b) => b.created - a.created);
+    },
   };
 }

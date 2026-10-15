@@ -99,6 +99,16 @@ export const WorkflowSettlement = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("checkpoint"), key: z.string(), response: Json }),
 ]);
 export type WorkflowSettlement = z.infer<typeof WorkflowSettlement>;
+export const WorktreeKeptReason = z.enum(["changes", "commits", "nested", "in-use", "unregistered", "error"]);
+export const WorkflowWorktreeOutcome = z.object({
+  key: z.string(),
+  directory: z.string(),
+  outcome: z.enum(["removed", "kept", "missing"]),
+  reason: WorktreeKeptReason.optional(),
+  message: z.string().optional(),
+  at: z.number(),
+});
+export type WorkflowWorktreeOutcome = z.infer<typeof WorkflowWorktreeOutcome>;
 export const WorkflowRun = z.object({
   version: z.literal(1),
   helperPolicy: z.enum(["legacy-bounded", "optional-counts"]).default("legacy-bounded"),
@@ -123,6 +133,7 @@ export const WorkflowRun = z.object({
   }).optional(),
   created: z.number(),
   updated: z.number(),
+  finished: z.number().optional(),
   phase: z.string(),
   steps: z.array(WorkflowStep),
   logs: z.array(z.object({ time: z.number(), text: z.string() })),
@@ -137,9 +148,32 @@ export const WorkflowRun = z.object({
   error: z.string().optional(),
   deliveryID: z.string(),
   delivered: z.boolean(),
+  worktreeCleanup: z.object({
+    complete: z.boolean(),
+    worktrees: z.array(WorkflowWorktreeOutcome),
+  }).optional(),
 });
 export type WorkflowRun = z.infer<typeof WorkflowRun>;
-export const WorkflowSummary = WorkflowRun.omit({ script: true, args: true, result: true, steps: true, logs: true, checkpoints: true, settlements: true, attention: true, fingerprint: true, callerAgent: true, deliveryID: true, delivered: true }).extend({
+export const WorkflowPrune = z.object({
+  apply: z.boolean().default(false),
+  olderThanDays: z.number().min(0).max(3650).optional(),
+}).strict();
+export const WorkflowPruneEntry = z.object({
+  runID: z.string(),
+  runStatus: WorkflowRun.shape.status,
+  key: z.string(),
+  directory: z.string(),
+  outcome: z.enum(["removed", "would-remove", "kept"]),
+  reason: z.enum([...WorktreeKeptReason.options, "unfinished"]).optional(),
+  message: z.string().optional(),
+});
+export const WorkflowPruneResult = z.object({
+  applied: z.boolean(),
+  worktrees: z.array(WorkflowPruneEntry),
+  counts: z.object({ removed: z.number(), wouldRemove: z.number(), kept: z.number() }),
+});
+export type WorkflowPruneResult = z.infer<typeof WorkflowPruneResult>;
+export const WorkflowSummary = WorkflowRun.omit({ script: true, args: true, result: true, steps: true, logs: true, checkpoints: true, settlements: true, attention: true, fingerprint: true, callerAgent: true, deliveryID: true, delivered: true, worktreeCleanup: true }).extend({
   counts: z.object({ completed: z.number(), running: z.number(), failed: z.number(), total: z.number() }),
   usage: WorkflowUsage,
 });

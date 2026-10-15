@@ -1,21 +1,27 @@
 import { afterEach, describe, expect, spyOn, test } from "bun:test";
-import { mkdir, mkdtemp, realpath, rm, symlink } from "node:fs/promises";
+import { mkdir, mkdtemp, realpath, rm, stat, symlink } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { tmpdir } from "node:os";
 import type { Plugin } from "@opencode/plugin";
 import { Session } from "@opencode/schema/session";
 import { SessionMessage } from "@opencode/schema/session-message";
 import { workflowEngine } from "../src/workflow-engine";
-import { authorizeWorkflowExecution, threads, workerIdentity } from "../src/threads";
+import { authorizeWorkflowExecution, serialized, threads, workerIdentity } from "../src/threads";
 import { WORKFLOW_CONTROL_HEADROOM, WORKFLOW_DIAGNOSTIC_JSON_BYTES, WorkflowAgentInput, WorkflowRun, WorkflowStart } from "../src/workflow-types";
 import { withWorkflowSlot, workflowDirectoryPlan } from "../src/workflow-worker";
+import type { CheckoutState } from "../src/workflow-cleanup";
 
 const temporary: string[] = [];
 afterEach(async () => Promise.all(temporary.splice(0).map((path) => rm(path, { recursive: true, force: true }))));
 
-async function harness(mode: "valid" | "repair" | "missing" | "reported-fail" | "manual" | "move-idle" | "unmeasured" | "timeout-race" | "timeout-reject" | "large-error", maxWorkers = 2) {
-  const directory = await mkdtemp(join(tmpdir(), "workflow-engine-"));
-  temporary.push(directory);
+type WorktreeLayout = { cleanupWorktrees?: boolean };
+
+async function harness(mode: "valid" | "repair" | "missing" | "reported-fail" | "manual" | "move-idle" | "unmeasured" | "timeout-race" | "timeout-reject" | "large-error", maxWorkers = 2, layout?: WorktreeLayout) {
+  const root = await mkdtemp(join(tmpdir(), "workflow-engine-"));
+  temporary.push(root);
+  // With a layout, worktrees are real directories under the temporary root and stay registered until removed.
+  const directory = layout ? join(root, "project") : root;
+  if (layout) await mkdir(directory);
   const file = join(directory, "storage.json");
   let values: Record<string, unknown> = {};
   const writes: string[] = [];
@@ -54,6 +60,13 @@ async function harness(mode: "valid" | "repair" | "missing" | "reported-fail" | 
   let profilePermissions: unknown[] = [{ action: "read", resource: "*", effect: "allow" }];
   const saved = new Map<string, string>();
   const worktreeProjects: string[] = [];
+  const registered = new Map<string, string>();
+  const removals: { projectID: string; directory: string; force: boolean }[] = [];
+  const inspections: string[] = [];
+  const agentLocations: string[] = [];
+  let checkoutState: (directory: string, signal?: AbortSignal) => CheckoutState | Promise<CheckoutState> = () => "clean";
+  let removalRefusal: (directory: string) => "dirty" | "fail" | undefined = () => undefined;
+  let beforeReserve: () => Promise<void> = async () => {};
   let worktreeGate: { entered: () => void; wait: Promise<void> } | undefined;
   const ctx = {
     storage,
@@ -81,7 +94,8 @@ async function harness(mode: "valid" | "repair" | "missing" | "reported-fail" | 
       },
     },
     agent: {
-      async get({ agentID }: { agentID: string }) {
+      async get({ agentID, location }: { agentID: string; location?: { directory?: string } }) {
+        if (location?.directory) agentLocations.push(location.directory);
         return { data: {
           model: undefined,
           permissions: agentID === "caller"
@@ -92,7 +106,9 @@ async function harness(mode: "valid" | "repair" | "missing" | "reported-fail" | 
       },
     },
     worktree: {
-      async list() { return []; },
+      async list(input: { projectID: string }) {
+        return layout ? [...registered].filter(([, projectID]) => projectID === input.projectID).map(([directory]) => ({ directory })) : [];
+      },
       async create(input: { projectID: string; directory: string; name: string }) {
         worktreeProjects.push(input.projectID);
         if (worktreeGate) {
@@ -101,7 +117,21 @@ async function harness(mode: "valid" | "repair" | "missing" | "reported-fail" | 
           gate.entered();
           await gate.wait;
         }
-        return { directory: join(input.directory, input.name) };
+        const created = join(input.directory, input.name);
+        if (layout) {
+          await mkdir(created, { recursive: true });
+          registered.set(created, input.projectID);
+        }
+        return { directory: created };
+      },
+      async remove(input: { projectID: string; directory: string; force: boolean }) {
+        removals.push(structuredClone(input));
+        if (registered.get(input.directory) !== input.projectID) throw new Error(`Invalid worktree directory: ${input.directory}`);
+        const refusal = removalRefusal(input.directory);
+        if (refusal === "dirty") throw Object.assign(new Error(`'${input.directory}' contains modified or untracked files, use --force to delete it`), { _tag: "Git.WorktreeError", forceRequired: true });
+        if (refusal === "fail") throw new Error("worktree removal failed");
+        registered.delete(input.directory);
+        await rm(input.directory, { recursive: true, force: true });
       },
     },
   } as unknown as Plugin.Context;
@@ -117,7 +147,11 @@ async function harness(mode: "valid" | "repair" | "missing" | "reported-fail" | 
   const spawnInputs: { key: string; directory?: string; paths?: string[] }[] = [];
   const spawnScopes: { granted: unknown; isolation: unknown }[] = [];
   const fakeWorkers = {
-    async reserveWorkflow(_actor: string, input: { key: string }) { reservations.push(input.key); return "source-project"; },
+    async reserveWorkflow(_actor: string, input: { key: string }) {
+      reservations.push(input.key);
+      await beforeReserve();
+      return layout ? "project" : "source-project";
+    },
     async spawnWorkflow(actor: string, input: { key: string }, _runtime: unknown, metadata: Record<string, unknown>) {
       spawns++;
       spawnInputs.push(structuredClone(input));
@@ -201,6 +235,13 @@ async function harness(mode: "valid" | "repair" | "missing" | "reported-fail" | 
   } as unknown as ReturnType<typeof threads>;
   const engine = () => workflowEngine(ctx, fakeWorkers, {
     maxWorkers,
+    ...(layout ? {
+      cleanupWorktrees: layout.cleanupWorktrees ?? true,
+      inspectCheckout: async (checkout: string, signal?: AbortSignal) => {
+        inspections.push(checkout);
+        return checkoutState(checkout, signal);
+      },
+    } : {}),
     loadSaved: async (name) => {
       const value = saved.get(name);
       if (value === undefined) throw new Error(`saved workflow ${name} not found`);
@@ -209,6 +250,19 @@ async function harness(mode: "valid" | "repair" | "missing" | "reported-fail" | 
   });
   api = engine();
   return {
+    registered, removals, inspections, agentLocations,
+    holdWorker: (stepKey: string) => {
+      const found = [...sessions.entries()].find(([, session]) =>
+        (session.metadata as { opWorkflow?: { stepKey?: string } } | undefined)?.opWorkflow?.stepKey === stepKey
+      );
+      if (!found) throw new Error(`worker ${stepKey} not found`);
+      let release!: () => void;
+      waits.set(found[0], new Promise<void>((resolve) => { release = resolve; }));
+      return () => release();
+    },
+    setCheckoutState: (value: typeof checkoutState) => { checkoutState = value; },
+    setRemovalRefusal: (value: typeof removalRefusal) => { removalRefusal = value; },
+    setBeforeReserve: (value: typeof beforeReserve) => { beforeReserve = value; },
     api, ownerID, directory, deliveries, deliveryTexts, writes, validationErrors, worktreeProjects, reservations, spawnInputs, spawnScopes, spawns: () => spawns, file,
     reopen: engine,
     failDeliveries: (count: number) => { deliveryFailures = count; },
@@ -1976,5 +2030,389 @@ return await agent("c", { key: "c", agent: "analyst" });`;
     ]);
     expect(fixture.deliveries.length).toBe(before + 1);
     await fixture.api.dispose();
+  });
+});
+
+const runtime = { agent: "caller", model: { providerID: "test", id: "model" } };
+const worktreeScript = (keys: string[], tail = `return "done";`) => `
+export const meta = { name: "cleanup", description: "worktree cleanup" };
+const keys = ${JSON.stringify(keys)};
+for (let i = 0; i < keys.length; i++) await agent(keys[i], { key: keys[i], agent: "analyst", access: "write", isolation: "worktree" });
+${tail}`;
+
+async function until(api: ReturnType<typeof workflowEngine>, ownerID: string, runID: string, done: (run: WorkflowRun) => boolean) {
+  let latest: WorkflowRun | undefined;
+  for (let count = 0; count < 400; count++) {
+    latest = await api.get(ownerID, runID);
+    if (done(latest)) return latest;
+    await Bun.sleep(5);
+  }
+  throw new Error(`workflow condition not reached: ${JSON.stringify({ status: latest?.status, delivered: latest?.delivered, worktreeCleanup: latest?.worktreeCleanup })}`);
+}
+
+const cleaned = (api: ReturnType<typeof workflowEngine>, ownerID: string, runID: string) =>
+  until(api, ownerID, runID, (run) => run.worktreeCleanup?.complete === true);
+const outcomes = (run: WorkflowRun) => Object.fromEntries((run.worktreeCleanup?.worktrees ?? []).map(({ key, outcome, reason }) => [key, reason ? `${outcome}:${reason}` : outcome]));
+const stepDirectory = (run: WorkflowRun, key: string) => run.steps.find((step) => step.key === key)!.directory;
+const exists = (path: string) => stat(path).then(() => true, () => false);
+
+describe("workflow worktree cleanup", () => {
+  test("removes a finished run's clean worktrees and records why it kept the others", async () => {
+    const fixture = await harness("valid", 2, {});
+    try {
+      fixture.setCheckoutState((directory) => directory.includes("-dirty-") ? "changes" : directory.includes("-committed-") ? "commits" : "clean");
+      fixture.setRemovalRefusal((directory) => directory.includes("-racing-") ? "dirty" : undefined);
+      const started = await fixture.api.start(fixture.ownerID, WorkflowStart.parse({
+        key: "cleanup-mixed",
+        script: worktreeScript(["clean", "dirty", "committed", "racing"], `await agent("shared", { key: "shared", agent: "analyst", access: "write" });\nreturn "done";`),
+      }), runtime);
+      const run = await cleaned(fixture.api, fixture.ownerID, started.id);
+      expect(run.status).toBe("completed");
+      expect(run.result).toBe("done");
+      expect(run.error).toBeUndefined();
+      expect(run.delivered).toBe(true);
+      expect(run.finished).toBeNumber();
+      expect(outcomes(run)).toEqual({ clean: "removed", dirty: "kept:changes", committed: "kept:commits", racing: "kept:changes" });
+      expect(fixture.removals).toEqual([
+        { projectID: "project", directory: stepDirectory(run, "clean"), force: false },
+        { projectID: "project", directory: stepDirectory(run, "racing"), force: false },
+      ]);
+      expect(await exists(stepDirectory(run, "clean"))).toBe(false);
+      for (const key of ["dirty", "committed", "racing"]) {
+        expect(await exists(stepDirectory(run, key))).toBe(true);
+        expect(fixture.registered.has(stepDirectory(run, key))).toBe(true);
+      }
+      const source = await realpath(run.directory);
+      expect(stepDirectory(run, "shared")).toBe(source);
+      expect(fixture.inspections).not.toContain(source);
+      expect(await exists(source)).toBe(true);
+    } finally { await fixture.api.dispose(); }
+  });
+
+  test("keeps worktrees of waiting, interrupted, and paused runs, then cleans them after stop", async () => {
+    const fixture = await harness("valid", 2, {});
+    let reopened: ReturnType<typeof workflowEngine> | undefined;
+    try {
+      const started = await fixture.api.start(fixture.ownerID, WorkflowStart.parse({
+        key: "cleanup-resumable",
+        script: worktreeScript(["write"], `return await checkpoint("Continue?", { key: "continue", reviewer: "coordinator" });`),
+      }), runtime);
+      const waiting = await reaches(fixture.api, fixture.ownerID, started.id, "waiting");
+      const directory = stepDirectory(waiting, "write");
+      const unfinished = (status: WorkflowRun["status"]) => ({ runID: started.id, runStatus: status, key: "write", directory, outcome: "kept" as const, reason: "unfinished" as const, message: expect.any(String) });
+      expect((await fixture.api.prune(fixture.ownerID, { apply: true })).worktrees).toEqual([unfinished("waiting")]);
+      await fixture.api.dispose();
+      reopened = fixture.reopen();
+      expect((await reopened.get(fixture.ownerID, started.id)).status).toBe("interrupted");
+      expect((await reopened.prune(fixture.ownerID, { apply: true })).worktrees).toEqual([unfinished("interrupted")]);
+      await fixture.mutateRun(started.id, (run) => { run.status = "paused"; });
+      expect((await reopened.prune(fixture.ownerID, { apply: true })).worktrees).toEqual([unfinished("paused")]);
+      const kept = await reopened.get(fixture.ownerID, started.id);
+      expect(kept.worktreeCleanup).toBeUndefined();
+      expect(kept.finished).toBeUndefined();
+      expect(fixture.removals).toEqual([]);
+      expect(await exists(directory)).toBe(true);
+      await reopened.control(fixture.ownerID, { runID: started.id, action: "stop" });
+      const stopped = await cleaned(reopened, fixture.ownerID, started.id);
+      expect(stopped.status).toBe("stopped");
+      expect(outcomes(stopped)).toEqual({ write: "removed" });
+      expect(await exists(directory)).toBe(false);
+    } finally { await reopened?.dispose(); await fixture.api.dispose(); }
+  });
+
+  test("cleanup failures neither delay delivery nor change the recorded result", async () => {
+    const fixture = await harness("valid", 2, {});
+    try {
+      let release!: () => void;
+      const gate = new Promise<void>((resolve) => { release = resolve; });
+      fixture.setCheckoutState(async (directory): Promise<CheckoutState> => {
+        if (!directory.includes("-blocked-")) return "clean";
+        await gate;
+        throw new Error("git is unavailable");
+      });
+      fixture.setRemovalRefusal((directory) => directory.includes("-failing-") ? "fail" : undefined);
+      const started = await fixture.api.start(fixture.ownerID, WorkflowStart.parse({
+        key: "cleanup-failure", script: worktreeScript(["blocked", "failing"], `return { ok: true };`),
+      }), runtime);
+      const delivered = await until(fixture.api, fixture.ownerID, started.id, (run) => run.delivered);
+      expect(delivered.status).toBe("completed");
+      expect(delivered.result).toEqual({ ok: true });
+      expect(delivered.worktreeCleanup).toEqual({ complete: false, worktrees: [] });
+      expect(fixture.deliveries).toContain(delivered.deliveryID);
+      release();
+      const run = await cleaned(fixture.api, fixture.ownerID, started.id);
+      expect(run.status).toBe("completed");
+      expect(run.result).toEqual({ ok: true });
+      expect(run.error).toBeUndefined();
+      expect(run.worktreeCleanup!.worktrees.map(({ key, outcome, reason, message }) => ({ key, outcome, reason, message }))).toEqual([
+        { key: "blocked", outcome: "kept", reason: "error", message: "Could not inspect the checkout: git is unavailable" },
+        { key: "failing", outcome: "kept", reason: "error", message: "Could not remove the worktree: worktree removal failed" },
+      ]);
+      expect(fixture.deliveries.filter((id) => id === run.deliveryID)).toHaveLength(1);
+    } finally { await fixture.api.dispose(); }
+  });
+
+  test("prune is a dry run by default, and apply removes only clean worktrees", async () => {
+    const fixture = await harness("valid", 2, { cleanupWorktrees: false });
+    try {
+      fixture.setCheckoutState((directory) => directory.includes("-dirty-") ? "changes" : "clean");
+      const started = await fixture.api.start(fixture.ownerID, WorkflowStart.parse({
+        key: "prune-later", script: worktreeScript(["clean", "dirty"]),
+      }), runtime);
+      const finished = await until(fixture.api, fixture.ownerID, started.id, (run) => run.delivered);
+      expect(finished.worktreeCleanup).toBeUndefined();
+      expect(fixture.removals).toEqual([]);
+      const key = `workflows/runs/${started.id}`;
+      const before = structuredClone(await fixture.getStorage(key));
+      const writes = fixture.writes.length;
+      const dry = await fixture.api.prune(fixture.ownerID, {});
+      expect(dry.applied).toBe(false);
+      expect(dry.worktrees.map(({ key, outcome, reason }) => ({ key, outcome, reason }))).toEqual([
+        { key: "clean", outcome: "would-remove", reason: undefined },
+        { key: "dirty", outcome: "kept", reason: "changes" },
+      ]);
+      expect(dry.counts).toEqual({ removed: 0, wouldRemove: 1, kept: 1 });
+      expect(fixture.removals).toEqual([]);
+      expect(fixture.writes.length).toBe(writes);
+      expect(await fixture.getStorage(key)).toEqual(before);
+      for (const step of ["clean", "dirty"]) expect(await exists(stepDirectory(finished, step))).toBe(true);
+
+      const applied = await fixture.api.prune(fixture.ownerID, { apply: true });
+      expect(applied.applied).toBe(true);
+      expect(applied.counts).toEqual({ removed: 1, wouldRemove: 0, kept: 1 });
+      expect(fixture.removals).toEqual([{ projectID: "project", directory: stepDirectory(finished, "clean"), force: false }]);
+      expect(await exists(stepDirectory(finished, "clean"))).toBe(false);
+      expect(await exists(stepDirectory(finished, "dirty"))).toBe(true);
+      const recorded = await fixture.api.get(fixture.ownerID, started.id);
+      expect(outcomes(recorded)).toEqual({ clean: "removed", dirty: "kept:changes" });
+      expect(recorded.worktreeCleanup!.complete).toBe(true);
+      expect(recorded.status).toBe("completed");
+      expect(recorded.result).toBe("done");
+      expect(recorded.steps.map((step) => step.status)).toEqual(["completed", "completed"]);
+      expect(() => fixture.workerID("clean")).not.toThrow();
+
+      const again = await fixture.api.prune(fixture.ownerID, { apply: true });
+      expect(again.worktrees.map(({ key, outcome }) => ({ key, outcome }))).toEqual([{ key: "dirty", outcome: "kept" }]);
+      expect(fixture.removals).toHaveLength(1);
+    } finally { await fixture.api.dispose(); }
+  });
+
+  test("prune scope: other projects, worktrees in use by unfinished runs, age, and non-root callers", async () => {
+    const fixture = await harness("valid", 2, { cleanupWorktrees: false });
+    try {
+      const first = await fixture.api.start(fixture.ownerID, WorkflowStart.parse({ key: "scope-a", script: worktreeScript(["write"]) }), runtime);
+      const finished = await until(fixture.api, fixture.ownerID, first.id, (run) => run.delivered);
+      const directory = stepDirectory(finished, "write");
+      const second = await fixture.api.start(fixture.ownerID, WorkflowStart.parse({
+        key: "scope-b",
+        script: `export const meta = { name: "follow-up", description: "uses a retained worktree" };
+await agent("check", { key: "check", agent: "analyst", directory: ${JSON.stringify(directory)} });
+return await checkpoint("Continue?", { key: "continue", reviewer: "coordinator" });`,
+      }), runtime);
+      await reaches(fixture.api, fixture.ownerID, second.id, "waiting");
+      const inUse = await fixture.api.prune(fixture.ownerID, { apply: true });
+      expect(inUse.worktrees.map(({ runID, outcome, reason }) => ({ runID, outcome, reason }))).toEqual([{ runID: first.id, outcome: "kept", reason: "in-use" }]);
+      await fixture.api.control(fixture.ownerID, { runID: second.id, action: "stop" });
+      expect((await fixture.api.prune(fixture.ownerID, { olderThanDays: 1 })).worktrees).toEqual([]);
+      await fixture.mutateRun(first.id, (run) => { run.finished = Date.now() - 2 * 86_400_000; });
+      expect((await fixture.api.prune(fixture.ownerID, { olderThanDays: 1 })).worktrees.map(({ outcome }) => outcome)).toEqual(["would-remove"]);
+      await fixture.mutateRun(first.id, (run) => { run.projectID = "elsewhere"; });
+      expect((await fixture.api.prune(fixture.ownerID, { apply: true })).worktrees).toEqual([]);
+      await fixture.mutateRun(first.id, (run) => { run.projectID = "project"; });
+      const worker = fixture.workerID("write");
+      await expect(fixture.api.prune(worker, { apply: true })).rejects.toThrow("Only a root session");
+      expect(fixture.removals).toEqual([]);
+      expect((await fixture.api.prune(fixture.ownerID, { apply: true })).counts).toEqual({ removed: 1, wouldRemove: 0, kept: 0 });
+    } finally { await fixture.api.dispose(); }
+  });
+
+  test("a workflow cannot record a step in a checkout while cleanup removes it", async () => {
+    const fixture = await harness("valid", 2, {});
+    try {
+      let release!: () => void;
+      const gate = new Promise<void>((resolve) => { release = resolve; });
+      fixture.setCheckoutState(async (): Promise<CheckoutState> => {
+        await gate;
+        return "clean";
+      });
+      const first = await fixture.api.start(fixture.ownerID, WorkflowStart.parse({ key: "exclusion-a", script: worktreeScript(["write"]) }), runtime);
+      while (fixture.inspections.length === 0) await Bun.sleep(2);
+      const checkout = fixture.inspections[0];
+      const spawned = fixture.spawns();
+      const lookups = fixture.agentLocations.length;
+      const second = await fixture.api.start(fixture.ownerID, WorkflowStart.parse({
+        key: "exclusion-b",
+        script: `export const meta = { name: "late", description: "uses a checkout under removal" };
+return await agent("check", { key: "check", agent: "analyst", directory: ${JSON.stringify(checkout)} });`,
+      }), runtime);
+      // The source profile lookup comes just before the step is recorded.
+      while (!fixture.agentLocations.slice(lookups).includes(checkout)) await Bun.sleep(2);
+      await Bun.sleep(50);
+      expect((await fixture.api.get(fixture.ownerID, second.id)).steps).toEqual([]);
+      expect(fixture.spawns()).toBe(spawned);
+      release();
+      const failed = await until(fixture.api, fixture.ownerID, second.id, (run) => run.status === "failed");
+      expect(failed.error).toContain("no longer exists");
+      expect(failed.steps).toEqual([]);
+      expect(fixture.spawns()).toBe(spawned);
+      expect(outcomes(await cleaned(fixture.api, fixture.ownerID, first.id))).toEqual({ write: "removed" });
+      expect(await exists(checkout)).toBe(false);
+    } finally { await fixture.api.dispose(); }
+  });
+
+  test("keeps a finished run's checkout while its worker is still running", async () => {
+    const fixture = await harness("valid", 2, { cleanupWorktrees: false });
+    try {
+      const started = await fixture.api.start(fixture.ownerID, WorkflowStart.parse({ key: "busy-worker", script: worktreeScript(["write"]) }), runtime);
+      const finished = await until(fixture.api, fixture.ownerID, started.id, (run) => run.delivered);
+      const release = fixture.holdWorker("write");
+      const busy = await fixture.api.prune(fixture.ownerID, { apply: true });
+      expect(busy.worktrees.map(({ outcome, reason, message }) => ({ outcome, reason, message }))).toEqual([
+        { outcome: "kept", reason: "in-use", message: "A worker in this directory is still running." },
+      ]);
+      expect(fixture.inspections).toEqual([]);
+      expect(fixture.removals).toEqual([]);
+      release();
+      expect((await fixture.api.prune(fixture.ownerID, { apply: true })).counts.removed).toBe(1);
+      expect(await exists(stepDirectory(finished, "write"))).toBe(false);
+    } finally { await fixture.api.dispose(); }
+  });
+
+  test("keeps a checkout while a finished run from another project runs a worker in it", async () => {
+    const fixture = await harness("valid", 2, { cleanupWorktrees: false });
+    try {
+      const first = await fixture.api.start(fixture.ownerID, WorkflowStart.parse({ key: "shared-checkout", script: worktreeScript(["write"]) }), runtime);
+      const checkout = stepDirectory(await until(fixture.api, fixture.ownerID, first.id, (run) => run.delivered), "write");
+      const second = await fixture.api.start(fixture.ownerID, WorkflowStart.parse({
+        key: "other-project",
+        script: `export const meta = { name: "reader", description: "reads a retained checkout" };
+return await agent("check", { key: "check", agent: "analyst", directory: ${JSON.stringify(checkout)} });`,
+      }), runtime);
+      await until(fixture.api, fixture.ownerID, second.id, (run) => run.delivered);
+      await fixture.mutateRun(second.id, (run) => { run.projectID = "elsewhere"; });
+      const release = fixture.holdWorker("check");
+      const held = await fixture.api.prune(fixture.ownerID, { apply: true });
+      expect(held.worktrees.map(({ key, outcome, reason }) => ({ key, outcome, reason }))).toEqual([{ key: "write", outcome: "kept", reason: "in-use" }]);
+      expect(fixture.removals).toEqual([]);
+      release();
+      expect((await fixture.api.prune(fixture.ownerID, { apply: true })).counts.removed).toBe(1);
+    } finally { await fixture.api.dispose(); }
+  });
+
+  test("disposal stops a cleanup pass promptly, and the next engine finishes it", async () => {
+    const fixture = await harness("valid", 2, {});
+    let reopened: ReturnType<typeof workflowEngine> | undefined;
+    try {
+      let stopped = false;
+      fixture.setCheckoutState((_directory, signal) => new Promise<CheckoutState>((_resolve, reject) => {
+        signal?.addEventListener("abort", () => { stopped = true; reject(signal.reason); }, { once: true });
+      }));
+      const started = await fixture.api.start(fixture.ownerID, WorkflowStart.parse({ key: "dispose-pass", script: worktreeScript(["write"]) }), runtime);
+      while (fixture.inspections.length === 0) await Bun.sleep(2);
+      const before = Date.now();
+      await fixture.api.dispose();
+      expect(Date.now() - before).toBeLessThan(1_000);
+      expect(stopped).toBe(true);
+      const record = WorkflowRun.parse(await fixture.getStorage(`workflows/runs/${started.id}`));
+      expect(record.status).toBe("completed");
+      expect(record.worktreeCleanup).toEqual({ complete: false, worktrees: [] });
+      fixture.setCheckoutState(() => "clean");
+      reopened = fixture.reopen();
+      expect(outcomes(await cleaned(reopened, fixture.ownerID, started.id))).toEqual({ write: "removed" });
+    } finally { await reopened?.dispose(); await fixture.api.dispose(); }
+  });
+
+  test("disposal stops cleanup before it waits for an active run blocked behind cleanup", async () => {
+    const fixture = await harness("valid", 2, {});
+    try {
+      fixture.setCheckoutState((_directory, signal) => new Promise<CheckoutState>((_resolve, reject) => {
+        signal?.addEventListener("abort", () => reject(signal.reason), { once: true });
+      }));
+      const finished = await fixture.api.start(fixture.ownerID, WorkflowStart.parse({ key: "holding-pass", script: worktreeScript(["write"]) }), runtime);
+      while (fixture.inspections.length === 0) await Bun.sleep(2);
+      const worker = (await fixture.api.get(fixture.ownerID, finished.id)).steps[0].workerID;
+      // Reserving a worker reconciles follow-ups under the same lock that the pass holds.
+      let blocked = false;
+      fixture.setBeforeReserve(async () => {
+        blocked = true;
+        await serialized(`followup/${worker}`, async () => {});
+      });
+      await fixture.api.start(fixture.ownerID, WorkflowStart.parse({ key: "blocked-run", script: worktreeScript(["next"]) }), runtime);
+      while (!blocked) await Bun.sleep(2);
+      const before = Date.now();
+      await fixture.api.dispose();
+      expect(Date.now() - before).toBeLessThan(1_000);
+      expect(fixture.removals).toEqual([]);
+    } finally { await fixture.api.dispose(); }
+  });
+
+  test("disposal does not wait long for a pass that ignores the stop", async () => {
+    const fixture = await harness("valid", 2, {});
+    fixture.setCheckoutState(() => new Promise<CheckoutState>(() => {}));
+    await fixture.api.start(fixture.ownerID, WorkflowStart.parse({ key: "stuck-pass", script: worktreeScript(["write"]) }), runtime);
+    while (fixture.inspections.length === 0) await Bun.sleep(2);
+    const before = Date.now();
+    await fixture.api.dispose();
+    expect(Date.now() - before).toBeLessThan(3_000);
+    expect(fixture.removals).toEqual([]);
+  });
+
+  test("a restarted engine finishes an interrupted pass without repeating recorded worktrees", async () => {
+    const layout = { cleanupWorktrees: false };
+    const fixture = await harness("valid", 2, layout);
+    let reopened: ReturnType<typeof workflowEngine> | undefined;
+    try {
+      const started = await fixture.api.start(fixture.ownerID, WorkflowStart.parse({ key: "cleanup-restart", script: worktreeScript(["first", "second"]) }), runtime);
+      const finished = await until(fixture.api, fixture.ownerID, started.id, (run) => run.delivered);
+      await fixture.api.dispose();
+      await fixture.mutateRun(started.id, (run) => {
+        run.worktreeCleanup = { complete: false, worktrees: [{ key: "first", directory: stepDirectory(finished, "first"), outcome: "kept", reason: "changes", at: 1 }] };
+      });
+      const disabled = fixture.reopen();
+      try {
+        await disabled.get(fixture.ownerID, started.id);
+        await Bun.sleep(20);
+        expect((await disabled.get(fixture.ownerID, started.id)).worktreeCleanup?.complete).toBe(false);
+        expect(fixture.inspections).toEqual([]);
+      } finally { await disabled.dispose(); }
+      layout.cleanupWorktrees = true;
+      reopened = fixture.reopen();
+      const run = await cleaned(reopened, fixture.ownerID, started.id);
+      expect(outcomes(run)).toEqual({ first: "kept:changes", second: "removed" });
+      expect(fixture.inspections).toEqual([stepDirectory(finished, "second")]);
+      expect(fixture.removals.map((removal) => removal.directory)).toEqual([stepDirectory(finished, "second")]);
+    } finally { await reopened?.dispose(); await fixture.api.dispose(); }
+  });
+
+  test("runs recorded before cleanup existed still load, and prune keeps their finish time", async () => {
+    const layout = { cleanupWorktrees: false };
+    const fixture = await harness("valid", 2, layout);
+    let reopened: ReturnType<typeof workflowEngine> | undefined;
+    try {
+      const started = await fixture.api.start(fixture.ownerID, WorkflowStart.parse({ key: "legacy-cleanup", script: worktreeScript(["write"]) }), runtime);
+      await until(fixture.api, fixture.ownerID, started.id, (run) => run.delivered);
+      await fixture.api.dispose();
+      const key = `workflows/runs/${started.id}`;
+      const legacy = structuredClone(await fixture.getStorage(key)) as Record<string, unknown>;
+      const updated = Date.now() - 3 * 86_400_000;
+      delete legacy.finished;
+      delete legacy.worktreeCleanup;
+      legacy.updated = updated;
+      await fixture.setStorage(key, legacy);
+      layout.cleanupWorktrees = true;
+      reopened = fixture.reopen();
+      const loaded = await reopened.get(fixture.ownerID, started.id);
+      expect(loaded.status).toBe("completed");
+      expect(loaded.finished).toBeUndefined();
+      expect(loaded.worktreeCleanup).toBeUndefined();
+      await Bun.sleep(20);
+      expect(fixture.removals).toEqual([]);
+      expect((await reopened.prune(fixture.ownerID, { olderThanDays: 4 })).worktrees).toEqual([]);
+      const applied = await reopened.prune(fixture.ownerID, { apply: true, olderThanDays: 2 });
+      expect(applied.worktrees.map(({ key, outcome }) => ({ key, outcome }))).toEqual([{ key: "write", outcome: "removed" }]);
+      const recorded = await reopened.get(fixture.ownerID, started.id);
+      expect(recorded.finished).toBe(updated);
+      expect(outcomes(recorded)).toEqual({ write: "removed" });
+    } finally { await reopened?.dispose(); await fixture.api.dispose(); }
   });
 });

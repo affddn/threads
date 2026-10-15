@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { realpath } from "node:fs/promises";
-import { dirname, isAbsolute, join, relative } from "node:path";
+import { dirname, isAbsolute, join, relative, sep } from "node:path";
 import type { Plugin } from "@opencode/plugin";
 import type { Permission } from "@opencode/schema/permission";
 import { Session } from "@opencode/schema/session";
@@ -123,6 +123,13 @@ function safePrefix(value: string) {
   return value.replace(/[^a-zA-Z0-9_-]/g, "-").slice(0, 28);
 }
 
+export const WORKTREE_PARENT = ".opencode-workflows";
+
+export function workflowWorktreeName(runID: string, namespacedKey: string) {
+  const hash = createHash("sha256").update(namespacedKey).digest("hex").slice(0, 16);
+  return `workflow-${runID.slice(-10)}-${safePrefix(namespacedKey)}-${hash}`;
+}
+
 export function workflowDirectoryPlan(
   run: WorkflowRun,
   input: WorkflowAgentInput,
@@ -133,15 +140,14 @@ export function workflowDirectoryPlan(
   if (input.access !== "write") {
     throw new Error("Worktree isolation is only supported for explicit write steps");
   }
-  const hash = createHash("sha256").update(namespacedKey).digest("hex").slice(0, 16);
-  const name = `workflow-${run.id.slice(-10)}-${safePrefix(namespacedKey)}-${hash}`;
-  const parent = join(dirname(source), ".opencode-workflows");
+  const name = workflowWorktreeName(run.id, namespacedKey);
+  const parent = join(dirname(source), WORKTREE_PARENT);
   return { source, name, parent, directory: join(parent, name) };
 }
 
-function inside(path: string, root: string) {
+export function inside(path: string, root: string) {
   const child = relative(root, path);
-  return child === "" || (!child.startsWith("..") && !isAbsolute(child));
+  return child === "" || (child !== ".." && !child.startsWith(`..${sep}`) && !isAbsolute(child));
 }
 
 // `input.paths` must already be resolved grants; a step may run inside one of them. `granted` means
