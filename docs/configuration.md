@@ -34,15 +34,18 @@ Keep your other plugin entries in the list.
 
 ### Server options
 
-| Option | Default | Range | What it limits |
+| Option | Default | Range | What it controls |
 | --- | --- | --- | --- |
 | `maxWorkers` | 4 | 1–32 | Unfinished workers per conversation. Workflow steps owned by that conversation count against the same limit. |
 | `workflowConcurrency` | 3 | 1–8 | Steps that one new workflow runs at the same time. |
 | `workflowMaxAgents` | Unset | 1–1,000 when supplied | Optional user-selected total-step budget for new workflows. |
+| `workflowWorktreeCleanup` | `true` | `true` or `false` | Whether a workflow removes its clean step worktrees when it ends. |
 
 A worker stops counting against `maxWorkers` when it reports, or when its run fails or is interrupted. A worker whose run ends without a report keeps its slot until you deal with it.
 
 Values passed to `workflows_start` override configured workflow values. Task budgets have no built-in defaults; agents leave them unset unless requested. Existing runs keep the limits they started with. A run never has more active steps than `maxWorkers` allows. To run eight steps at once, set `maxWorkers` and `workflowConcurrency` to at least 8.
+
+With `workflowWorktreeCleanup` set to `false`, finished runs keep all their step worktrees until you run `workflows_prune`. The setting affects only runs that end while it applies. See [clean up worktrees](workflows.md#clean-up-worktrees).
 
 ## Terminal plugin
 

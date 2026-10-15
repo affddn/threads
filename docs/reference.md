@@ -1,6 +1,6 @@
 # Reference
 
-This page lists the Threads worker tools, their fields, and the data they return. For workflow tools and script syntax, see the [workflow runtime contract](../skills/workflow-authoring/references/runtime.md).
+This page lists the Threads worker tools, their fields, and the data they return, plus [`workflows_prune`](#workflows_prune). For the other workflow tools and script syntax, see the [workflow runtime contract](../skills/workflow-authoring/references/runtime.md).
 
 ## Tools
 
@@ -92,6 +92,30 @@ Each worker session carries an `opThreads` metadata object with exactly `workerI
 - Workers started with `paths` also carry `opThreadsPaths`, the resolved list.
 
 Workers have no native `parentID`. They are top-level sessions.
+
+## `workflows_prune`
+
+Lists, and with `apply: true` removes, the step worktrees that finished workflow runs left behind. See [clean up worktrees](workflows.md#clean-up-worktrees) for the rules.
+
+| Field | Required | Meaning |
+| --- | --- | --- |
+| `apply` | No | `true` removes the checkouts listed as `would-remove`. The default, `false`, changes nothing. |
+| `olderThanDays` | No | Only runs that ended at least this many days ago, from 0 to 3,650. A run without a recorded end time, such as one that ended before this release, uses its last update time. |
+
+Who can call it: a top-level conversation whose agent can edit files. It covers every run in that conversation's project.
+
+The result is `{ applied, worktrees, counts }`. `counts` has `removed`, `wouldRemove`, and `kept`. Each entry in `worktrees` has these fields:
+
+| Field | Meaning |
+| --- | --- |
+| `runID`, `runStatus` | The run and its status. |
+| `key` | The step key. |
+| `directory` | The step's checkout. |
+| `outcome` | `removed`, `would-remove` (dry run), or `kept`. |
+| `reason` | Why it was kept: `changes`, `commits`, `nested`, `in-use`, `unregistered`, `error`, or `unfinished` (the run can still resume). |
+| `message` | Details for `reason`. |
+
+Checkouts that no longer exist are left out. With `apply: true`, the outcomes of finished runs are also recorded in the run's `worktreeCleanup`, which `workflows_inspect` returns.
 
 ## RPC
 

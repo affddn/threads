@@ -35,7 +35,7 @@ Inspect that workflow and summarize the confirmed findings and missing evidence.
 
 Press `p` in the run panel to pause new scheduling. Active steps finish before the run becomes paused.
 
-Press `x` to stop the run and interrupt its active workers. Completed results and worktree directories remain available.
+Press `x` to stop the run and interrupt its active workers. Completed results remain available. A stopped run can't be resumed, so Threads then [cleans up its worktrees](#clean-up-worktrees).
 
 Press `r` to resume. For a waiting checkpoint, enter a JSON response. For example, enter `true`, `42`, or a quoted string.
 
@@ -46,6 +46,52 @@ After a service restart, reopen the original conversation and select the run wit
 If a worker shows **Session failed** with a blocked-generation error, inspect the run, step, and worker named in that error. Follow the same recovery procedure after a plugin reload. A restart notice alone does not authorize the worker to continue.
 
 For an uncertain write, ask the agent to inspect the retained worker and directory. Send the resolution request to that same worker. After the worker reports and finishes, resume the run. Use the [recovery contract](../skills/workflow-authoring/references/runtime.md#start-and-control) for crash and legacy-journal limits.
+
+## Clean up worktrees
+
+A step with `isolation: "worktree"` works in its own git checkout under `.opencode-workflows/`, next to its source directory. OpenCode creates the checkout on a detached `HEAD`, without a branch.
+
+When a run ends, Threads removes each of its step checkouts that would lose nothing:
+
+- The checkout has no uncommitted or untracked changes. Ignored files, such as `node_modules`, don't count and are removed with it.
+- Every commit at its `HEAD` is also on a branch, a tag, or a remote branch.
+
+A run ends when it is `completed`, `failed`, or `stopped`. These runs can't be resumed. A run that is `running`, `pausing`, `waiting`, `paused`, `stopping`, or `interrupted` keeps its checkouts, because it still uses them or can resume in them. Resume doesn't restore a removed checkout: it would create a fresh one from the source's current `HEAD`.
+
+Threads removes a checkout through OpenCode, which runs `git worktree remove` without `--force`. Branches, commits, run records, and worker conversations stay. Shared steps run in their source directory, which Threads never removes. A checkout is also kept while it contains another worktree, while an unfinished run uses it as a step directory, while a worker located in it is running, and while the run's owning conversation is located in it. Threads can't see where other conversations are located, so it can remove a clean checkout that another conversation is still in.
+
+A workflow step can't start in a checkout while Threads removes it. If the checkout is gone by the time the step is recorded, the step fails with an error that says the directory no longer exists. A follow-up you send to a worker in that checkout waits until the removal finishes.
+
+Cleanup starts after the run's final status and result are recorded and Threads has tried to deliver its completion notice, so it can't delay or change them. Ask the agent to inspect the run to see what happened. Its `worktreeCleanup` lists each checkout as `removed`, `missing` (already gone), or `kept` with a reason:
+
+| Reason | Meaning |
+| --- | --- |
+| `changes` | The checkout has uncommitted or untracked changes. |
+| `commits` | `HEAD` has commits that no branch, tag, or remote contains. To keep them, create a branch in the checkout, then prune. |
+| `nested` | Another worktree is inside the checkout. Removing the checkout would delete it, even when git ignores it. |
+| `in-use` | An unfinished run uses the directory, a worker in it is still running, or the owning or calling conversation is located in it. |
+| `unregistered` | No known project lists the directory as a worktree. |
+| `error` | Inspection, the check for a running worker, or removal failed, or cleanup stopped first. `message` says why. |
+
+To keep a writer's work for integration after the run, ask it to commit to a named branch or to leave its changes uncommitted.
+
+If OpenCode stops during cleanup, Threads finishes it the next time the owning conversation lists, inspects, or controls its workflows, for example when you open `/workflows` there. `workflows_prune` also finds anything it left. If you send a follow-up to a finished run's worker, its checkout may already be gone.
+
+To turn automatic cleanup off, set [`workflowWorktreeCleanup`](configuration.md#server-options) to `false`. The setting applies to runs that end while it's on. Runs that ended earlier, or while it was off, are left for `workflows_prune`.
+
+### Prune leftover worktrees
+
+Ask the agent to list what's left:
+
+```text
+Run workflows_prune and show me which worktrees it would remove.
+```
+
+`workflows_prune` changes nothing by default. It lists the step checkouts of finished runs that still exist, with the same rules and reasons as automatic cleanup. It also lists checkouts of unfinished runs as kept with reason `unfinished`. To make those removable, stop the run from its owning conversation.
+
+To remove the clean checkouts, ask the agent to call it again with `apply: true`. Prune records what it removed and kept on each run. It doesn't delete run records, sessions, or branches. Add `olderThanDays` to limit it to runs that ended at least that many days ago.
+
+Prune covers every finished run in the current conversation's project, whichever conversation owns it. Only a run's owner can control it while it can still change. A finished run can't change, and prune removes only checkouts that lose nothing, so it doesn't need that ownership check. This lets you clean up runs from conversations you no longer have open. Only a top-level conversation can prune, and agents that can't edit files don't get the tool.
 
 ## Save a useful workflow
 

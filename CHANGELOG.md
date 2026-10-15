@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+- When a workflow run completes, fails, or stops, Threads removes each step worktree that has no uncommitted or untracked changes and whose commits a branch, tag, or remote contains. It runs `git worktree remove` without `--force` and never deletes branches. Shared steps, runs that can still resume, checkouts that contain another worktree, and checkouts where a worker is still running keep their directories. The run's new `worktreeCleanup` field records what was removed and kept, and why. Cleanup starts after the result is recorded and can't change it.
+- A workflow step can no longer be recorded in a checkout while cleanup removes it. A step whose checkout is already gone fails with a clear error.
+- Add the `workflowWorktreeCleanup` server option. Set it to `false` to keep finished runs' worktrees.
+- Add the `workflows_prune` tool. It lists step worktrees left by finished runs in the current project, including runs that ended before this release, and changes nothing unless called with `apply: true`. `olderThanDays` limits it to older runs. It never deletes run records, sessions, or branches.
+- Runs record when they ended in a new `finished` field.
+
 ## 0.3.1
 
 - Background worker-tab and Threads list refreshes no longer show a toast when an OpenCode service restart drops the connection. They retry every two seconds and report a transport failure only after it lasts 15 seconds. Other errors and failures from commands you run are still reported immediately.

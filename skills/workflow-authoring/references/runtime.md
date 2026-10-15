@@ -22,7 +22,7 @@ The body supports top-level `await`, ordinary data transformations, branching, a
 | `phase` | Optional phase override. |
 | `schema` | Optional JSON Schema for the result. Invalid schemas fail before dispatch. |
 | `access` | `read` by default: only the profile's permitted read, glob, grep, webfetch, websearch, and skill tools. `write` permits the selected profile's other tools. |
-| `isolation` | `shared` by default, or `worktree` for a retained isolated checkout. Creating a worktree requires `access: "write"`; later readers can use its returned `directory`. |
+| `isolation` | `shared` by default, or `worktree` for an isolated checkout that stays while the run can resume. Creating a worktree requires `access: "write"`; later readers can use its returned `directory`. |
 | `directory` | Optional existing directory beneath the owner session's directory, in one of its registered worktrees, or inside a granted path. Symlinks are resolved before containment checks. For another repository beneath that directory, worktree isolation uses the source repository's project and configured worktree strategy. A directory that only a grant admits has [extra conditions](#external-directories). |
 | `paths` | Optional list of up to 16 existing absolute directories outside the worker's directory that it may use without asking. Each path and its subdirectories are granted for `external_directory` only. |
 | `timeoutMs` | Optional user-requested step timeout, bounded by any supplied run deadline. |
@@ -88,6 +88,8 @@ The same start key and identical input identify the same run. Start retries do n
 After upgrading from finite defaults, an old start request that omitted its budgets no longer has the same input fingerprint. Resume the existing run through `workflows_control`, or supply its original recorded limits for an exact start retry.
 
 A service restart leaves interrupted work available for explicit resume. Worktrees and session evidence are retained. A missing result after an interrupted write requires inspection; it does not prove that no write occurred.
+
+When a run completes, fails, or stops, Threads removes each step worktree that has no uncommitted or untracked changes, no commits outside a branch, tag, or remote, no nested worktree, and no running worker. It never forces removal or deletes branches. A later step whose `directory` is in a removed checkout fails. The run's `worktreeCleanup` records what it removed and kept. The `workflowWorktreeCleanup` plugin option turns this off. `workflows_prune` lists leftover worktrees of finished runs in the project and removes the clean ones with `apply: true`. Running, waiting, paused, and interrupted runs keep their worktrees.
 
 Unanswered checkpoints and interruptions send durable, deduplicated notices to the owner. Checkpoint notices include the exact key and prompt. Each interruption has a separate notice. Delivery failures retry at a later boundary, recovery, or inspection with the same message ID. A notice never supplies a checkpoint response or resumes the run. Resuming after the original deadline interrupts retained workers and fails the run.
 
