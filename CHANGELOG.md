@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.3.1
 
 - Background worker-tab and Threads list refreshes no longer show a toast when an OpenCode service restart drops the connection. They retry every two seconds and report a transport failure only after it lasts 15 seconds. Other errors and failures from commands you run are still reported immediately.
 
