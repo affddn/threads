@@ -23,6 +23,8 @@ threads_spawn({
 
 The worker starts without opening a tab. Your conversation stays free.
 
+For delegated implementation or review, include a [capability preflight](capability-preflight.md) in the brief. The worker proves required access before substantive work; the coordinator checks that proof before accepting review coverage. Missing access means BLOCKED with an INCONCLUSIVE verdict, not zero findings.
+
 Each conversation can have 4 unfinished workers at a time. To change that limit, set [`maxWorkers`](configuration.md#server-options).
 
 ## Pick an agent and model

@@ -17,7 +17,7 @@ Both the parent and managed workers may use native `subagent` when useful. Deleg
 1. Confirm the `threads_spawn` tool is available. If it is unavailable, use native `subagent` or report that the plugin needs activation. Do not substitute a hidden `opencode run` process.
 2. Assign an existing absolute directory and a stable task key.
 3. If the tool schema supports `agent`, select a configured profile explicitly. Use `agent: "vera-core"` for a VERA workstream that owns integration and may delegate. Use a specialist profile for a leaf task or read-only review. Omitting `agent` inherits the caller's active agent and model. Older plugin versions always inherit them.
-4. Call `threads_spawn` with `key`, `title`, `directory`, `task`, and the selected `agent`. Include the goal, scope, relevant context, constraints, delegation allowance, acceptance criteria, verification commands, and expected report in `task`.
+4. Call `threads_spawn` with `key`, `title`, `directory`, `task`, and the selected `agent`. Include the goal, scope, relevant context, constraints, delegation allowance, acceptance criteria, verification commands, expected report, and the required-capability table from [capability preflight](references/capability-preflight.md) in `task`.
 5. Save the returned worker session ID and inspect its returned agent and model when present.
 
 An identical spawn key retries the original admission. Different work or a different agent requires a new key. A selected profile supplies its real system prompt, model preference, and permissions in the assigned directory. A profile without a model inherits the caller's resolved model. It has a separate conversation, so include all context it needs in the task brief. Mentioning a role in the brief does not select that profile.
@@ -27,6 +27,14 @@ Explicit role selection requires an `allow` for `subagent` on that role ID. Sele
 If the worker needs a directory outside its assigned one, such as a reference repository, pass it in `paths`. The worker can then use that directory without asking, within its own permissions. Explicit `external_directory` denies still win, and a different `paths` list requires a new key. Naming a path in the brief does not grant it.
 
 If the selected profile is unavailable, fix its configuration and retry the identical spawn request. The indexed worker stays uninitialized until that retry succeeds. Do not use `threads_send` to start it.
+
+## Prove capability before substantive work
+
+The worker checks its actual session/profile and assigned directory, then proves every required capability using an available direct tool or CodeMode route and a safe authorized read or local runtime check. Discovery alone is not access proof. Include named external paths when required; `paths` grants never override explicit denies or profile restrictions. A read-only Linear issue fetch is one possible task-specific example, not a universal dependency. Never request secrets or production writes for preflight.
+
+Return a brief receipt with the identity/profile evidence, directory, required capabilities, actual tool routes and non-secret targets, results, and coverage limits. If required access is unavailable, stop with status **BLOCKED**, use the existing **INCONCLUSIVE** report verdict, and name the unavailable coverage. Missing access is not zero findings. Do not change profiles or permissions automatically.
+
+The parent coordinator evaluates the receipt against the brief before treating the work as review coverage. This check does not require a new agent or universal extra startup orchestration. See the [brief template](references/capability-preflight.md) and [exact coordinator policy](references/capability-preflight.md#coordinator-acceptance-policy).
 
 ## Write the delegation allowance
 
