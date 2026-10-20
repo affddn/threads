@@ -12,7 +12,7 @@ import {
 import { ThreadsIndicator } from "./activity-footer";
 import { ActivityPicker } from "./activity-picker";
 import { workInProgress } from "./idle";
-import { ThreadsRpc, WorkerView } from "./rpc";
+import { ThreadsRpc, WorkerView, type Configuration } from "./rpc";
 import { applyWorkerSnapshot, transportGrace, uiState } from "./ui-location";
 import { snapshotEvent } from "./snapshot-events";
 
@@ -35,7 +35,16 @@ export function activity(
   color: Pick<typeof RGBA, "fromHex">,
   solid: Pick<typeof import("solid-js"), "createEffect" | "createSignal">,
   spinner: boolean,
-  settings: { workflows: () => number; openWorkflows: () => void },
+  settings: {
+    workflows: () => number;
+    openWorkflows: () => void;
+    observeSnapshot?: (snapshot: {
+      configuration?: z.infer<typeof Configuration>;
+      requestedDirectory: string;
+      primaryDirectory: string;
+      focusedDirectory?: string;
+    }) => void;
+  },
 ) {
   const { createEffect, createSignal } = solid;
   const fallbackColor = color.fromHex("#808080");
@@ -300,14 +309,16 @@ export function activity(
       ];
       for (let index = 0; index < ids.length && !stopped; index += 100) {
         const coordinatorIDs = ids.slice(index, index + 100);
-        const result = await uiState(ctx, coordinatorIDs, (location) => rpc.snapshot(
-          { coordinatorIDs },
-          {
-            signal: abort.signal,
-            location,
-          },
-        ));
+        const primaryDirectory = (ctx.location ?? ctx.data.location.default()).directory;
+        const route = ctx.ui.router.current();
+        const focusedDirectory = route.type === "session" ? ctx.data.session.get(route.sessionID)?.location.directory : undefined;
+        const { result, requestedDirectory } = await uiState(ctx, coordinatorIDs, async (location) => {
+          const requestedDirectory = location.directory;
+          const result = await rpc.snapshot({ coordinatorIDs }, { signal: abort.signal, location });
+          return { result, requestedDirectory };
+        });
         if (stopped) return;
+        settings.observeSnapshot?.({ configuration: result.configuration, requestedDirectory, primaryDirectory, focusedDirectory });
         applyWorkerSnapshot(workers, coordinatorIDs, result.workers);
       }
       for (const id of new Set(

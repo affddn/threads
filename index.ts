@@ -35,6 +35,7 @@ export default Plugin.define({
     await ctx.rpc.register(ThreadsRpc, {
       snapshot: async ({ coordinatorIDs }) => ({
         workers: (await Promise.all(coordinatorIDs.map((id) => workers.list(id, "snapshot")))).flat(),
+        configuration: { mode, directory: ctx.location.directory },
       }),
       restore: async ({ coordinatorIDs }) => ({
         workers: (await Promise.all(coordinatorIDs.map(workers.restore))).flat(),

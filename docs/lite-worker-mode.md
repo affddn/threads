@@ -12,7 +12,11 @@ The server and terminal read their own `options.mode`. Neither entry configures 
 | Omit | Workflow engine and heartbeat initialization; workflow and heartbeat tools and RPC; workflow skill and server commands; workflow navigator, panels, sidebar, and workflow refresh. |
 | Optional | Full mode retains all existing workflow features. Workflow options apply only there. |
 
-A full terminal with a lite server can request unavailable workflow RPC. A lite terminal with a full server hides workflow controls but does not stop the engine. There is no cross-entry mode negotiation.
+A full terminal with a lite server can request unavailable workflow RPC. A lite terminal with a full server hides workflow controls but does not stop the engine. The worker snapshot now includes optional server mode and responding-directory metadata. The terminal warns once per distinct mismatch without disabling worker access. There is no cross-entry mode negotiation or automatic switch.
+
+Global worker snapshots can fall back to another observed location when the primary location is unavailable. The warning labels the actual responding directory; even matching modes there do not confirm the primary or focused location. Older servers without metadata get a bounded, deduplicated unknown-mode notice, not a confirmed match. Full-mode workflow UI remains registered as before, even during a mismatch.
+
+These diagnostics are **not an active-workflow migration guard**. Switching a workflow location to lite removes `workflows_result`, checkpoint, recovery, control, and heartbeat surfaces. It does not migrate or delete native records or worktrees, or prove that no active workflows exist. Keep those locations full. The diagnostic does not scan workflow journals.
 
 Lite uses the same worker implementation and unchanged briefing and report contracts. `threads.ts` still contains workflow helpers and execution-grant bookkeeping. Its workflow project assertion loads `workflow-worker.ts` only in the workflow worker path. Shared path schemas live in `granted-paths.ts`, with compatible exports from `workflow-types.ts`.
 
@@ -41,7 +45,6 @@ Reproduce with `XDG_CONFIG_HOME="$PWD/.audit/lite-empty-config" bun scripts/meas
 
 ## Ranked follow-ons
 
-1. Add cross-entry mode diagnostics before considering wider rollout.
-2. Verify a packed lite installation in an isolated native terminal, including worker list keyboard input and full-mode regression coverage.
-3. Measure native idle and active overhead before making performance claims.
-4. Consider a separate worker-only package only if runtime isolation is insufficient. Keep briefing and report contract changes out of that packaging decision.
+1. Run the maintained [installed Lite recovery and diagnostic suites](development.md#run-the-checks), plus full-mode package UI checks, on the exact final tarball before adoption.
+2. Measure native idle and active overhead before making performance claims.
+3. Consider a separate worker-only package only if runtime isolation is insufficient. Keep briefing and report contract changes out of that packaging decision.

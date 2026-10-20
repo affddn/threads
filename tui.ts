@@ -5,6 +5,7 @@ import { z } from "zod";
 import { ThreadsRpc } from "./src/rpc";
 import { activity } from "./src/activity";
 import { Mode } from "./src/mode";
+import { modeDiagnostics } from "./src/mode-diagnostic";
 import { reportedTabAction } from "./src/activity-model";
 import { workInProgress } from "./src/idle";
 import { RGBA } from "@opentui/core";
@@ -17,6 +18,7 @@ export default Plugin.define({
   id: "op-threads",
   async setup(ctx) {
     const mode = Mode.parse(ctx.options.mode);
+    const diagnostic = modeDiagnostics(mode);
     const workflows = mode === "full"
       ? (await import("./src/workflow-ui")).workflowUI(ctx, RGBA.fromHex("#808080"))
       : undefined;
@@ -26,7 +28,13 @@ export default Plugin.define({
       RGBA,
       { createEffect, createSignal },
       getComponentCatalogue().spinner !== undefined,
-      { workflows: workflows?.active ?? (() => 0), openWorkflows: workflows?.open ?? (() => {}) },
+      {
+        workflows: workflows?.active ?? (() => 0), openWorkflows: workflows?.open ?? (() => {}),
+        observeSnapshot: (snapshot) => {
+          const message = diagnostic(snapshot);
+          if (message) ctx.ui.toast.show({ message, variant: "warning" });
+        },
+      },
     );
     const closing = new Set<string>();
     const abort = new AbortController();
@@ -70,11 +78,7 @@ export default Plugin.define({
         const coordinatorIDs = trackedCoordinatorIDs();
         if (!coordinatorIDs.length) return;
         const { workers } = await uiState(ctx, coordinatorIDs, (location) => rpc.snapshot(
-          { coordinatorIDs },
-          {
-            location,
-            signal: abort.signal,
-          },
+          { coordinatorIDs }, { location, signal: abort.signal },
         ));
         known = workers.map((worker) => worker.workerID);
         list.updateWorkers(workers, coordinatorIDs);

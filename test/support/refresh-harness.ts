@@ -3,12 +3,17 @@ import type { Plugin } from "@opencode/plugin/tui";
 import plugin from "../../tui";
 import { workflowStore } from "../../src/workflow-store";
 import { WorkflowRun, workflowSummary } from "../../src/workflow-types";
+import type { Configuration, WorkerView } from "../../src/rpc";
+import type { z } from "zod";
 
 export const settle = () => new Promise<void>((resolve) => setImmediate(resolve));
 export const streams = ["session.text.delta", "session.reasoning.delta", "session.tool.input.delta", "session.compaction.delta", "session.step.streamed", "session.tool.progress"];
 
 // Host boundaries only: production plugin setup/listeners, UI refresh and journal parsing run unchanged.
-export async function refreshHarness(savedRuns = 0, options: { mode?: "lite" | "full" } = {}, entry = plugin) {
+export async function refreshHarness(savedRuns = 0, options: { mode?: "lite" | "full" } = {}, entry = plugin, snapshotOptions: {
+  configuration?: z.infer<typeof Configuration> | null; primaryDirectory?: string; fallbackDirectory?: string; tabsEnabled?: boolean;
+  workers?: z.infer<typeof WorkerView>[];
+} = {}) {
   let owner = "A";
   let panel: { name: string; sessionID: string } | undefined;
   const records = new Map<string, Parameters<ServerPlugin.Context["storage"]["set"]>[1]>();
@@ -47,8 +52,12 @@ export async function refreshHarness(savedRuns = 0, options: { mode?: "lite" | "
   const errors: unknown[] = [];
   let workerFailure: unknown;
   let holdWorkers: (() => unknown) | undefined;
+  let snapshotGate: Promise<void> | undefined;
+  let active = false;
+  const workerRequests: string[] = [];
   const ctx = {
     options,
+    location: { directory: snapshotOptions.primaryDirectory ?? "/fixture" },
     client: {
       rpc: (definition: { id: string }) => { rpcIDs.push(definition.id); return definition.id === "workflows" ? {
         snapshot: async ({ ownerID }: { ownerID: string }) => {
@@ -62,29 +71,35 @@ export async function refreshHarness(savedRuns = 0, options: { mode?: "lite" | "
           return run;
         },
       } : {
-        snapshot: async (_input: unknown, options?: { signal?: AbortSignal }) => {
+        snapshot: async (_input: unknown, rpcOptions?: { signal?: AbortSignal; location?: { directory: string } }) => {
           counts.workerSnapshots++;
+          workerRequests.push(rpcOptions?.location?.directory ?? "unknown");
+          if (snapshotGate) await snapshotGate;
           if (holdWorkers) {
             const abort = holdWorkers;
-            await new Promise((_, reject) => options?.signal?.addEventListener("abort", () => reject(abort()), { once: true }));
+            await new Promise((_, reject) => rpcOptions?.signal?.addEventListener("abort", () => reject(abort()), { once: true }));
           }
           if (workerFailure !== undefined) throw workerFailure;
-          return { workers: [] };
+          if (snapshotOptions.fallbackDirectory && rpcOptions?.location?.directory === ctx.location.directory)
+            throw { _tag: "LocationNotFoundError", location: ctx.location };
+          return { workers: snapshotOptions.workers ?? [], configuration: snapshotOptions.configuration === null ? undefined : snapshotOptions.configuration ?? { mode: options.mode ?? "full", directory: "/fixture" } };
         },
         restore: async () => ({ workers: [] }),
       }; },
-      session: { list: async () => ({ data: [] }), get: async () => undefined },
+      session: { list: async () => ({ data: [] }), get: async ({ sessionID }: { sessionID: string }) => ({
+        id: sessionID, title: sessionID, location: { directory: "/fixture" }, metadata: {}, time: { created: 0, updated: 0 },
+      }) },
     },
     storage: { store: (_key: string, { initial }: { initial: unknown }) => [initial, async () => {}] },
     data: {
-      location: { default: () => ({ directory: "/fixture" }) },
-      session: { get: () => undefined, status: () => "idle", permission: { list: () => [] }, form: { list: () => [] } },
+      location: { default: () => ({ directory: snapshotOptions.fallbackDirectory ?? "/fixture" }) },
+      session: { get: () => undefined, status: () => active ? "running" : "idle", permission: { list: () => [] }, form: { list: () => [] } },
       listen: (listener: typeof listeners extends Set<infer T> ? T : never) => { listeners.add(listener); return () => listeners.delete(listener); },
     },
     ui: {
       router: { current: () => ({ type: "session", sessionID: owner }) },
       panel: { current: () => panel, open: (name: string) => { panel = { name, sessionID: owner }; } },
-      tabs: { enabled: () => true, list: () => [] },
+      tabs: { enabled: () => snapshotOptions.tabsEnabled ?? true, list: () => [] },
       slot: ({ append, render }: { append: string; render: () => unknown }) => { slotIDs.push(append); if (append === "app") slots.push(render); return () => {}; },
       dialog: { select: async () => savedRuns ? `run-${owner === "A" ? 0 : 1}` : undefined, show: () => {}, set: () => {} },
       toast: { show: (error: unknown) => errors.push(error) },
@@ -97,13 +112,20 @@ export async function refreshHarness(savedRuns = 0, options: { mode?: "lite" | "
   for (const render of slots) render();
   await settle();
   return {
-    counts, errors, store, inspected, rpcIDs, slotIDs, commandIDs: [...commands.keys()],
+    counts, errors, store, inspected, rpcIDs, slotIDs, workerRequests, commandIDs: [...commands.keys()],
     event: (type: string) => { for (const listener of listeners) listener({ details: { type, data: { sessionID: owner } } }); },
     owner: (id: string) => { owner = id; },
     panel: (name?: string) => { panel = name ? { name, sessionID: owner } : undefined; },
     command: (id: string) => commands.get(id)?.(),
     failWorkerSnapshots: (error?: unknown) => { workerFailure = error; },
     holdWorkerSnapshots: (abortError?: () => unknown) => { holdWorkers = abortError; },
+    active: (value: boolean) => { active = value; },
+    primary: (directory: string) => { ctx.location.directory = directory; },
+    pauseWorkerSnapshots: () => {
+      let release!: () => void;
+      snapshotGate = new Promise<void>((resolve) => { release = resolve; });
+      return () => { snapshotGate = undefined; release(); };
+    },
     dispose: () => { if (typeof dispose === "function") dispose(); },
   };
 }

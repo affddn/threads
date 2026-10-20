@@ -60,6 +60,8 @@ The terminal plugin accepts `mode: "lite" | "full"`, defaulting to `"full"`. Ser
 
 Keep existing workflow locations in full mode. Lite is not a migration and does not resume workflows or heartbeat monitors. A mismatch leaves workflow UI without its server RPC, or a full server without workflow UI. See [lite worker mode](lite-worker-mode.md) for the feature boundary.
 
+The terminal warns on mismatched worker-snapshot metadata, labeling the actual responding directory. Fallback snapshots verify neither the primary nor focused location; legacy servers without metadata remain unconfirmed. Warnings do not disable workers or guard active workflow migrations.
+
 ## Pin a version
 
 Add the version to the package name in both files, for example `@op1/threads@0.3.2`.

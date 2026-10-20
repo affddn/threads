@@ -1,6 +1,11 @@
 import { Rpc } from "@opencode/plugin/rpc";
 import { z } from "zod";
 
+export const Configuration = z.object({
+  mode: z.enum(["full", "lite"]),
+  directory: z.string(),
+});
+
 export const Report = z
   .object({
     verdict: z.enum(["PASS", "PASS WITH NOTES", "FAIL", "INCONCLUSIVE"]),
@@ -33,7 +38,7 @@ export const ThreadsRpc = Rpc.define({
       input: z
         .object({ coordinatorIDs: z.array(z.string()).max(100) })
         .strict(),
-      output: z.object({ workers: z.array(WorkerView) }),
+      output: z.object({ workers: z.array(WorkerView), configuration: Configuration.optional() }),
       errors: {},
     },
     restore: {

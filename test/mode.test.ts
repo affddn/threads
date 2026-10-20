@@ -35,6 +35,9 @@ test("fresh production server lite registers workers without loading workflow or
   expect(lite.rpcs).toEqual(["threads"]);
   expect(lite.skills).toBe(0);
   expect(lite.commands).toBe(0);
+  expect(lite.snapshot).toEqual({ workers: [], configuration: { mode: "lite", directory: process.cwd() } });
+  expect(lite.retainedUnchanged).toBe(true);
+  expect(lite.storageCalls.some((call: string) => /:(workflows|heartbeat)\//.test(call))).toBe(false);
   expect(lite.list).toEqual({ content: '{"workers":[]}', output: { workers: [] } });
   const full = await registration("full");
   expect(full).toEqual(await registration("default"));
@@ -45,6 +48,7 @@ test("fresh production server lite registers workers without loading workflow or
   expect(full.rpcs).toEqual(["threads", "workflows-heartbeat", "workflows"]);
   expect(full.hooks).toEqual(["prompt", "context", "prompt", "context"]);
   expect(full.skills).toBe(1);
+  expect(full.snapshot).toEqual({ workers: [], configuration: { mode: "full", directory: process.cwd() } });
   expect(full.commands).toBeGreaterThanOrEqual(2);
 }, 20000);
 
@@ -96,6 +100,19 @@ test("fresh source and Solid-compiled terminal keep workflow initialization behi
         expect(result.commands).toContain("workflows.open");
         expect(result.counts.workflowSnapshots).toBeGreaterThan(0);
       }
+      for (const scenario of ["mismatch", ...(mode === "lite" ? ["legacy", "fallback"] : [])]) {
+        const diagnostic = Bun.spawn([process.execPath, "test/support/terminal-mode-isolation.ts", mode, target, scenario], { stdout: "pipe", stderr: "pipe" });
+        const [output, error, exit] = await Promise.all([new Response(diagnostic.stdout).text(), new Response(diagnostic.stderr).text(), diagnostic.exited]);
+        expect(exit).toBe(0);
+        expect(error).toBe("");
+        const state = JSON.parse(output);
+        expect(state.errors).toHaveLength(1);
+        const message = state.errors[0].message;
+        expect(message).toContain(scenario === "mismatch" ? `Threads mode mismatch: terminal ${mode}; server ${mode === "lite" ? "full" : "lite"}`
+          : scenario === "legacy" ? "server mode unknown at requested directory /fixture" : "primary directory /missing remain unverified");
+        expect(state.commands).toContain("threads.reopen");
+        expect(state.counts.workerSnapshots).toBeGreaterThan(0);
+      }
     }
   }
-}, 20000);
+}, 30000);

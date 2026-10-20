@@ -107,6 +107,10 @@ import { z as z4 } from "zod";
 // src/rpc.ts
 import { Rpc } from "@opencode/plugin/rpc";
 import { z as z2 } from "zod";
+var Configuration = z2.object({
+  mode: z2.enum(["full", "lite"]),
+  directory: z2.string()
+});
 var Report = z2.object({
   verdict: z2.enum(["PASS", "PASS WITH NOTES", "FAIL", "INCONCLUSIVE"]),
   summary: z2.string().min(1),
@@ -133,7 +137,7 @@ var ThreadsRpc = Rpc.define({
   methods: {
     snapshot: {
       input: z2.object({ coordinatorIDs: z2.array(z2.string()).max(100) }).strict(),
-      output: z2.object({ workers: z2.array(WorkerView) }),
+      output: z2.object({ workers: z2.array(WorkerView), configuration: Configuration.optional() }),
       errors: {}
     },
     restore: {
