@@ -49,6 +49,8 @@
     "typecheck": "tsc --noEmit",
     "test": "bun test",
     "verify:live": "uv run --with pyte python scripts/verify-live.py",
+    "verify:lite-recovery": "python3 scripts/verify-lite-recovery.py",
+    "verify:lite-diagnostics": "uv run --with pyte python scripts/verify-lite-diagnostics.py",
     "verify:package-ui": "uv run --with pyte python scripts/verify-package-ui.py",
     "verify:roles": "python3 scripts/verify-roles.py",
     "verify:footer": "uv run --with pyte python scripts/verify-footer.py",

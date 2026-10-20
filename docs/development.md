@@ -42,6 +42,8 @@ The native suites start an isolated OpenCode server with a deterministic local m
 | Command | What it checks |
 | --- | --- |
 | `bun run verify:live` | Worker tools, durable messages, permissions, limits, deleted workers, restarts, and the footer indicator. |
+| `bun run verify:lite-recovery /absolute/path/package.tgz` | Installed Lite tools: identical retries, conflicting payloads, ownership, immutable report, native follow-up outcomes, interrupt, and pending-follow-up restart reconciliation. |
+| `bun run verify:lite-diagnostics /absolute/path/package.tgz` | Installed compiled terminal: matching/default modes, visible mismatches in both directions, warning deduplication, and usable worker list/search/Escape. |
 | `bun run verify:footer` | The footer indicator, the Threads list, its keys, tab closing, `/threads`, and restart. |
 | `bun run verify:roles` | Agent profiles: system prompts, models, delegation, read-only work, reports, and retries. |
 | `bun run verify:workflows` | Workflow pipelines, retries, roles, checkpoints, saved scripts, worktrees, restarts, the navigator, the footer's workflow count, and the sidebar section. |
@@ -55,6 +57,10 @@ The native suites start an isolated OpenCode server with a deterministic local m
 | `bun run verify:package-ui <package>` | A packed or published package, installed under `node_modules`, in a clean terminal. |
 
 Run the checks that match your change. Evidence goes to `.audit/`, which git ignores.
+
+Both Lite commands require an exact npm tarball and install it under isolated `node_modules`. Each attempt gets a fresh HOME, all XDG directories, localhost synthetic provider, and owned service under `.audit/lite-followups/`. `--artifacts <new-directory>` selects a distinct attempt path. Existing directories are rejected. Tarball hashes, configuration, tool inputs/results, native message/inbox readback, provider requests, failures, and cleanup receipts are retained. No live plugin storage is edited. Keep failed attempts when correcting the harness.
+
+The recovery suite kills only its own exact service subprocess while a follow-up is pending. OpenCode may resume that native turn automatically. The suite then distinguishes readback from production coordinator-context reconciliation and identical retry. It checks one follow-up admission ID and completion notice, not exactly-once arbitrary external effects or model execution. Fixture token counts are synthetic, not a real token trial. Native message readback is explicitly bounded to fewer than 100 messages per owned session; extending the suite past that bound requires pagination. Full-mode `verify:package-ui` remains a separate release requirement on the same final tarball.
 
 Use `THREADS_ARTIFACT_DIR=<new-directory>` to retain separate footer and workflow attempts. To compare streaming load, run `uv run --with pyte python scripts/measure-native-load.py <baseline-package> <changed-package> <new-directory>`. The harness measures native snapshots, journal reads, and concurrent health requests with closed and open workflow panels.
 

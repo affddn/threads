@@ -29,9 +29,9 @@ def eventually(check, timeout=30):
 
 
 class Sandbox:
-    def __init__(self, configuration, artifact_dir):
+    def __init__(self, configuration, artifact_dir, root_dir=None):
         self.binary = shutil.which("opencode")
-        tmp = subprocess.check_output([self.binary, "debug", "paths", "tmp"], text=True).strip()
+        tmp = root_dir if root_dir is not None else subprocess.check_output([self.binary, "debug", "paths", "tmp"], text=True).strip()
         self.root = Path(tempfile.mkdtemp(prefix="op-threads-verify-", dir=tmp))
         self.artifacts = artifact_dir
         artifact_dir.mkdir(parents=True, exist_ok=True)
@@ -39,6 +39,7 @@ class Sandbox:
         self.worker = self.root / "worker"
         self.directory.mkdir()
         self.worker.mkdir()
+        (self.root / "runtime").mkdir(mode=0o700)
         configuration_dir = self.root / "config" / "opencode"
         configuration_dir.mkdir(parents=True)
         (configuration_dir / "opencode.json").write_text(json.dumps(configuration))
@@ -56,6 +57,7 @@ class Sandbox:
             "XDG_DATA_HOME": str(self.root / "data"),
             "XDG_STATE_HOME": str(self.root / "state"),
             "XDG_CACHE_HOME": str(self.root / "cache"),
+            "XDG_RUNTIME_DIR": str(self.root / "runtime"),
             "FIXTURE_API_KEY": "local-fixture-only",
             "TERM": "xterm-256color",
             "COLORTERM": "truecolor",

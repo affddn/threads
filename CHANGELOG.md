@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Add a reusable capability-preflight brief and coordinator acceptance policy for managed sessions. Missing required access is BLOCKED/INCONCLUSIVE, not zero findings.
+- Worker snapshots include optional server mode and directory metadata. The terminal warns once per distinct mismatch or unknown/fallback configuration without disabling workers or changing workflow state.
+- Add exact-tarball `verify:lite-recovery` and `verify:lite-diagnostics` suites using isolated native services and synthetic localhost providers.
+
 - Add opt-in `mode: "lite"` independently to server and terminal entries. Both default to `"full"`. Lite keeps managed-worker tools, permissions, reports, recovery, and worker UI without initializing workflows or heartbeat. Set both entries consistently; existing workflow locations must stay full. See [lite worker mode](docs/lite-worker-mode.md).
 
 ## 0.3.2
