@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Add opt-in `mode: "lite"` independently to server and terminal entries. Both default to `"full"`. Lite keeps managed-worker tools, permissions, reports, recovery, and worker UI without initializing workflows or heartbeat. Set both entries consistently; existing workflow locations must stay full. See [lite worker mode](docs/lite-worker-mode.md).
+
 ## 0.3.2
 
 - When a workflow run completes, fails, or stops, Threads removes each step worktree that has no uncommitted or untracked changes and whose commits a branch, tag, or remote contains. It runs `git worktree remove` without `--force` and never deletes branches. Shared steps, runs that can still resume, checkouts that contain another worktree, and checkouts where a worker is still running keep their directories. The run's new `worktreeCleanup` field records what was removed and kept, and why. Cleanup starts after the result is recorded and can't change it.

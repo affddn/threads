@@ -3,11 +3,12 @@ import type { SessionContext } from "@opencode/plugin/promise/session";
 import { z } from "zod";
 import { Report, ThreadsRpc, WorkerView } from "./src/rpc";
 import { Send, Spawn, WorkerTarget, threads } from "./src/threads";
-import { workflows } from "./src/workflows";
+import { Mode } from "./src/mode";
 
 export default Plugin.define({
   id: "op-threads",
   async setup(ctx) {
+    const mode = Mode.parse(ctx.options.mode);
     const limit = z
       .number()
       .int()
@@ -125,6 +126,9 @@ export default Plugin.define({
         },
       });
     });
-    return workflows(ctx, workers, models, limit);
+    if (mode === "full") {
+      const { workflows } = await import("./src/workflows");
+      return workflows(ctx, workers, models, limit);
+    }
   },
 });

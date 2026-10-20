@@ -8,11 +8,11 @@ import { dirname, isAbsolute, join } from "node:path";
 import { homedir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
-import { z as z6 } from "zod";
+import { z as z7 } from "zod";
 
 // src/heartbeat-rpc.ts
 import { Rpc as Rpc2 } from "@opencode/plugin/rpc";
-import { z as z4 } from "zod";
+import { z as z5 } from "zod";
 
 // src/heartbeat-types.ts
 import { z } from "zod";
@@ -102,7 +102,7 @@ var RunnerHealth = z.object({ configured: z.boolean(), protocolCompatible: z.boo
 var Inspection = z.object({ monitors: z.array(HeartbeatView), runner: RunnerHealth }).strict();
 
 // src/workflow-types.ts
-import { z as z3 } from "zod";
+import { z as z4 } from "zod";
 
 // src/rpc.ts
 import { Rpc } from "@opencode/plugin/rpc";
@@ -145,174 +145,176 @@ var ThreadsRpc = Rpc.define({
   events: {}
 });
 
+// src/granted-paths.ts
+import { z as z3 } from "zod";
+var MAX_GRANTED_PATHS = 16;
+var GrantedPaths = z3.array(z3.string().min(1).max(4096)).max(MAX_GRANTED_PATHS);
 // src/workflow-types.ts
 var WORKFLOW_CONTROL_HEADROOM = 64 * 1024;
-var Json = z3.json();
-var WorkflowModel = z3.object({
-  providerID: z3.string(),
-  id: z3.string(),
-  variant: z3.string().optional()
+var Json = z4.json();
+var WorkflowModel = z4.object({
+  providerID: z4.string(),
+  id: z4.string(),
+  variant: z4.string().optional()
 });
-var WorkflowLimits = z3.object({
-  concurrency: z3.number().int().min(1).max(8).default(3),
-  maxAgents: z3.number().int().min(1).max(1000).nullable().default(4),
-  agentTimeoutMs: z3.number().int().min(1000).max(604800000).nullable().default(1800000),
-  timeoutMs: z3.number().int().min(1000).max(604800000).nullable().default(86400000),
-  tokenBudget: z3.number().int().positive().nullable().optional()
+var WorkflowLimits = z4.object({
+  concurrency: z4.number().int().min(1).max(8).default(3),
+  maxAgents: z4.number().int().min(1).max(1000).nullable().default(4),
+  agentTimeoutMs: z4.number().int().min(1000).max(604800000).nullable().default(1800000),
+  timeoutMs: z4.number().int().min(1000).max(604800000).nullable().default(86400000),
+  tokenBudget: z4.number().int().positive().nullable().optional()
 });
 var WorkflowStart = WorkflowLimits.extend({
   maxAgents: WorkflowLimits.shape.maxAgents.default(null),
   agentTimeoutMs: WorkflowLimits.shape.agentTimeoutMs.default(null),
   timeoutMs: WorkflowLimits.shape.timeoutMs.default(null),
-  key: z3.string().min(1).max(120),
-  script: z3.string().min(1).max(200000).optional(),
-  name: z3.string().regex(/^[a-zA-Z0-9][a-zA-Z0-9_-]{0,79}$/).optional(),
+  key: z4.string().min(1).max(120),
+  script: z4.string().min(1).max(200000).optional(),
+  name: z4.string().regex(/^[a-zA-Z0-9][a-zA-Z0-9_-]{0,79}$/).optional(),
   args: Json.default(null)
 }).strict().refine((value) => Boolean(value.script) !== Boolean(value.name), {
   message: "Supply exactly one of script or saved workflow name"
 });
-var MAX_GRANTED_PATHS = 16;
-var GrantedPaths = z3.array(z3.string().min(1).max(4096)).max(MAX_GRANTED_PATHS);
-var WorkflowAgentInput = z3.object({
-  key: z3.string().min(1).max(120),
-  prompt: z3.string().min(1).max(1e5),
-  agent: z3.string().min(1),
-  label: z3.string().min(1).max(160).optional(),
-  phase: z3.string().min(1).max(160).optional(),
-  schema: z3.record(z3.string(), Json).optional(),
-  access: z3.enum(["read", "write"]).default("read"),
-  isolation: z3.enum(["shared", "worktree"]).default("shared"),
-  directory: z3.string().min(1).optional(),
+var WorkflowAgentInput = z4.object({
+  key: z4.string().min(1).max(120),
+  prompt: z4.string().min(1).max(1e5),
+  agent: z4.string().min(1),
+  label: z4.string().min(1).max(160).optional(),
+  phase: z4.string().min(1).max(160).optional(),
+  schema: z4.record(z4.string(), Json).optional(),
+  access: z4.enum(["read", "write"]).default("read"),
+  isolation: z4.enum(["shared", "worktree"]).default("shared"),
+  directory: z4.string().min(1).optional(),
   paths: GrantedPaths.optional(),
-  timeoutMs: z3.number().int().min(1000).max(604800000).optional()
+  timeoutMs: z4.number().int().min(1000).max(604800000).optional()
 }).strict();
 var WorkflowResult = Report.extend({ result: Json }).strict();
-var WorkflowUsage = z3.object({
-  tokens: z3.number().nonnegative(),
-  cost: z3.number().nonnegative(),
-  measured: z3.boolean()
+var WorkflowUsage = z4.object({
+  tokens: z4.number().nonnegative(),
+  cost: z4.number().nonnegative(),
+  measured: z4.boolean()
 });
-var StepBase = z3.object({
-  key: z3.string(),
-  fingerprint: z3.string(),
-  index: z3.number().int().nonnegative(),
+var StepBase = z4.object({
+  key: z4.string(),
+  fingerprint: z4.string(),
+  index: z4.number().int().nonnegative(),
   input: WorkflowAgentInput,
-  workerID: z3.string(),
-  spawnKey: z3.string(),
-  created: z3.number(),
-  phase: z3.string(),
-  directory: z3.string(),
+  workerID: z4.string(),
+  spawnKey: z4.string(),
+  created: z4.number(),
+  phase: z4.string(),
+  directory: z4.string(),
   model: WorkflowModel,
-  profileFingerprint: z3.string()
+  profileFingerprint: z4.string()
 });
-var WorkflowStep = z3.discriminatedUnion("status", [
-  StepBase.extend({ status: z3.literal("prepared") }),
-  StepBase.extend({ status: z3.literal("running"), usage: WorkflowUsage.optional() }),
+var WorkflowStep = z4.discriminatedUnion("status", [
+  StepBase.extend({ status: z4.literal("prepared") }),
+  StepBase.extend({ status: z4.literal("running"), usage: WorkflowUsage.optional() }),
   StepBase.extend({
-    status: z3.literal("completed"),
-    completed: z3.number(),
+    status: z4.literal("completed"),
+    completed: z4.number(),
     report: WorkflowResult,
     usage: WorkflowUsage
   }),
   StepBase.extend({
-    status: z3.literal("failed"),
-    error: z3.string(),
-    retryable: z3.boolean(),
+    status: z4.literal("failed"),
+    error: z4.string(),
+    retryable: z4.boolean(),
     usage: WorkflowUsage.optional()
   })
 ]);
-var WorkflowCheckpoint = z3.object({
-  key: z3.string(),
-  prompt: z3.string(),
-  reviewer: z3.enum(["human", "coordinator"]).optional(),
+var WorkflowCheckpoint = z4.object({
+  key: z4.string(),
+  prompt: z4.string(),
+  reviewer: z4.enum(["human", "coordinator"]).optional(),
   response: Json.optional()
 });
-var WorkflowSettlement = z3.discriminatedUnion("kind", [
-  z3.object({ kind: z3.literal("agent"), key: z3.string(), outcome: z3.enum(["success", "failure"]), error: z3.string().optional() }),
-  z3.object({ kind: z3.literal("checkpoint"), key: z3.string(), response: Json })
+var WorkflowSettlement = z4.discriminatedUnion("kind", [
+  z4.object({ kind: z4.literal("agent"), key: z4.string(), outcome: z4.enum(["success", "failure"]), error: z4.string().optional() }),
+  z4.object({ kind: z4.literal("checkpoint"), key: z4.string(), response: Json })
 ]);
-var WorktreeKeptReason = z3.enum(["changes", "commits", "nested", "in-use", "unregistered", "error"]);
-var WorkflowWorktreeOutcome = z3.object({
-  key: z3.string(),
-  directory: z3.string(),
-  outcome: z3.enum(["removed", "kept", "missing"]),
+var WorktreeKeptReason = z4.enum(["changes", "commits", "nested", "in-use", "unregistered", "error"]);
+var WorkflowWorktreeOutcome = z4.object({
+  key: z4.string(),
+  directory: z4.string(),
+  outcome: z4.enum(["removed", "kept", "missing"]),
   reason: WorktreeKeptReason.optional(),
-  message: z3.string().optional(),
-  at: z3.number()
+  message: z4.string().optional(),
+  at: z4.number()
 });
-var WorkflowRun = z3.object({
-  version: z3.literal(1),
-  helperPolicy: z3.enum(["legacy-bounded", "optional-counts"]).default("legacy-bounded"),
-  id: z3.string(),
-  key: z3.string(),
-  ownerID: z3.string(),
-  callerAgent: z3.string(),
+var WorkflowRun = z4.object({
+  version: z4.literal(1),
+  helperPolicy: z4.enum(["legacy-bounded", "optional-counts"]).default("legacy-bounded"),
+  id: z4.string(),
+  key: z4.string(),
+  ownerID: z4.string(),
+  callerAgent: z4.string(),
   model: WorkflowModel,
-  projectID: z3.string(),
-  directory: z3.string(),
-  name: z3.string(),
-  description: z3.string(),
-  script: z3.string(),
+  projectID: z4.string(),
+  directory: z4.string(),
+  name: z4.string(),
+  description: z4.string(),
+  script: z4.string(),
   args: Json,
-  fingerprint: z3.string(),
+  fingerprint: z4.string(),
   limits: WorkflowLimits,
-  status: z3.enum(["running", "pausing", "paused", "stopping", "stopped", "waiting", "interrupted", "failed", "completed"]),
-  interruption: z3.object({
-    kind: z3.enum(["engine-disposed", "lease-lost"]),
-    priorStatus: z3.enum(["running", "waiting"]),
-    at: z3.number().finite().nonnegative()
+  status: z4.enum(["running", "pausing", "paused", "stopping", "stopped", "waiting", "interrupted", "failed", "completed"]),
+  interruption: z4.object({
+    kind: z4.enum(["engine-disposed", "lease-lost"]),
+    priorStatus: z4.enum(["running", "waiting"]),
+    at: z4.number().finite().nonnegative()
   }).optional(),
-  created: z3.number(),
-  updated: z3.number(),
-  finished: z3.number().optional(),
-  phase: z3.string(),
-  steps: z3.array(WorkflowStep),
-  logs: z3.array(z3.object({ time: z3.number(), text: z3.string() })),
-  checkpoints: z3.array(WorkflowCheckpoint),
-  settlements: z3.array(WorkflowSettlement).optional(),
-  attention: z3.object({
-    checkpoints: z3.array(z3.string()),
-    interruption: z3.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
-    deliveredInterruption: z3.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER)
+  created: z4.number(),
+  updated: z4.number(),
+  finished: z4.number().optional(),
+  phase: z4.string(),
+  steps: z4.array(WorkflowStep),
+  logs: z4.array(z4.object({ time: z4.number(), text: z4.string() })),
+  checkpoints: z4.array(WorkflowCheckpoint),
+  settlements: z4.array(WorkflowSettlement).optional(),
+  attention: z4.object({
+    checkpoints: z4.array(z4.string()),
+    interruption: z4.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
+    deliveredInterruption: z4.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER)
   }).optional(),
   result: Json.optional(),
-  error: z3.string().optional(),
-  deliveryID: z3.string(),
-  delivered: z3.boolean(),
-  worktreeCleanup: z3.object({
-    complete: z3.boolean(),
-    worktrees: z3.array(WorkflowWorktreeOutcome)
+  error: z4.string().optional(),
+  deliveryID: z4.string(),
+  delivered: z4.boolean(),
+  worktreeCleanup: z4.object({
+    complete: z4.boolean(),
+    worktrees: z4.array(WorkflowWorktreeOutcome)
   }).optional()
 });
-var WorkflowPrune = z3.object({
-  apply: z3.boolean().default(false),
-  olderThanDays: z3.number().min(0).max(3650).optional()
+var WorkflowPrune = z4.object({
+  apply: z4.boolean().default(false),
+  olderThanDays: z4.number().min(0).max(3650).optional()
 }).strict();
-var WorkflowPruneEntry = z3.object({
-  runID: z3.string(),
+var WorkflowPruneEntry = z4.object({
+  runID: z4.string(),
   runStatus: WorkflowRun.shape.status,
-  key: z3.string(),
-  directory: z3.string(),
-  outcome: z3.enum(["removed", "would-remove", "kept"]),
-  reason: z3.enum([...WorktreeKeptReason.options, "unfinished"]).optional(),
-  message: z3.string().optional()
+  key: z4.string(),
+  directory: z4.string(),
+  outcome: z4.enum(["removed", "would-remove", "kept"]),
+  reason: z4.enum([...WorktreeKeptReason.options, "unfinished"]).optional(),
+  message: z4.string().optional()
 });
-var WorkflowPruneResult = z3.object({
-  applied: z3.boolean(),
-  worktrees: z3.array(WorkflowPruneEntry),
-  counts: z3.object({ removed: z3.number(), wouldRemove: z3.number(), kept: z3.number() })
+var WorkflowPruneResult = z4.object({
+  applied: z4.boolean(),
+  worktrees: z4.array(WorkflowPruneEntry),
+  counts: z4.object({ removed: z4.number(), wouldRemove: z4.number(), kept: z4.number() })
 });
 var WorkflowSummary = WorkflowRun.omit({ script: true, args: true, result: true, steps: true, logs: true, checkpoints: true, settlements: true, attention: true, fingerprint: true, callerAgent: true, deliveryID: true, delivered: true, worktreeCleanup: true }).extend({
-  counts: z3.object({ completed: z3.number(), running: z3.number(), failed: z3.number(), total: z3.number() }),
+  counts: z4.object({ completed: z4.number(), running: z4.number(), failed: z4.number(), total: z4.number() }),
   usage: WorkflowUsage
 });
 
 // src/heartbeat-rpc.ts
-var RawRun = WorkflowRun.pick({ id: true, ownerID: true, projectID: true, directory: true, fingerprint: true, status: true, updated: true, checkpoints: true, interruption: true }).extend({ sessionIDs: z4.array(z4.string()).max(1000) }).strict();
-var HeartbeatSnapshot = z4.object({ record: HeartbeatRecord, run: RawRun.nullable(), unavailable: z4.string().optional() }).strict();
-var SnapshotInput = z4.object({ afterOwnerID: z4.string().optional(), limit: z4.number().int().min(1).max(100).default(100) }).strict();
-var SnapshotOutput = z4.object({ protocol: z4.literal(1), entries: z4.array(HeartbeatSnapshot), next: z4.string().optional() }).strict();
-var Apply = z4.object({ ownerID: z4.string(), monitorID: z4.string(), expectedRevision: z4.number().int(), bindingEpoch: z4.number().int(), observation: HeartbeatObservation }).strict();
+var RawRun = WorkflowRun.pick({ id: true, ownerID: true, projectID: true, directory: true, fingerprint: true, status: true, updated: true, checkpoints: true, interruption: true }).extend({ sessionIDs: z5.array(z5.string()).max(1000) }).strict();
+var HeartbeatSnapshot = z5.object({ record: HeartbeatRecord, run: RawRun.nullable(), unavailable: z5.string().optional() }).strict();
+var SnapshotInput = z5.object({ afterOwnerID: z5.string().optional(), limit: z5.number().int().min(1).max(100).default(100) }).strict();
+var SnapshotOutput = z5.object({ protocol: z5.literal(1), entries: z5.array(HeartbeatSnapshot), next: z5.string().optional() }).strict();
+var Apply = z5.object({ ownerID: z5.string(), monitorID: z5.string(), expectedRevision: z5.number().int(), bindingEpoch: z5.number().int(), observation: HeartbeatObservation }).strict();
 var HeartbeatRpc = Rpc2.define({ id: "workflows-heartbeat", methods: {
   snapshot: { input: SnapshotInput, output: SnapshotOutput, errors: {} },
   apply: { input: Apply, output: HeartbeatView, errors: {} }
@@ -442,16 +444,16 @@ function heartbeatProjectionDecision(record, run, observation, now) {
 // src/heartbeat-transport.ts
 import { Service } from "@opencode/client/service";
 import { readFile } from "node:fs/promises";
-import { z as z5 } from "zod";
+import { z as z6 } from "zod";
 var unavailable = "Existing compatible service unavailable; connect-only runner will not start it";
-var Version = z5.enum(["2.0.26", "2.0.28"]);
-var Registration = z5.object({
-  url: z5.string().transform((value, context) => {
+var Version = z6.enum(["2.0.26", "2.0.28"]);
+var Registration = z6.object({
+  url: z6.string().transform((value, context) => {
     const native = /^(https?:\/\/)(::1|::):([0-9]+)\/?$/.exec(value);
     const normalized = native ? `${native[1]}[${native[2]}]:${native[3]}` : value;
     if (!/^https?:\/\/(127\.0\.0\.1|0\.0\.0\.0|localhost|\[::1\]|\[::\])(?::[0-9]+)?\/?$/.test(normalized)) {
       context.addIssue({ code: "custom", message: "Heartbeat requires an unambiguous loopback service" });
-      return z5.NEVER;
+      return z6.NEVER;
     }
     try {
       const url = new URL(normalized);
@@ -464,14 +466,14 @@ var Registration = z5.object({
       return url.toString();
     } catch {
       context.addIssue({ code: "custom", message: "Heartbeat requires a valid loopback service" });
-      return z5.NEVER;
+      return z6.NEVER;
     }
   }),
-  pid: z5.number().int().positive(),
+  pid: z6.number().int().positive(),
   version: Version,
-  password: z5.string().optional()
+  password: z6.string().optional()
 });
-var Info = z5.object({ pid: z5.number().int().positive(), version: Version });
+var Info = z6.object({ pid: z6.number().int().positive(), version: Version });
 var heartbeatFetch = Object.assign((input, init) => fetch(input, { ...init, redirect: "error", signal: init?.signal ? AbortSignal.any([init.signal, AbortSignal.timeout(25000)]) : AbortSignal.timeout(25000) }), { preconnect: fetch.preconnect });
 async function heartbeatEndpoint(file) {
   const text = await readFile(file, "utf8").catch(() => {
@@ -505,7 +507,7 @@ async function heartbeatEndpoint(file) {
 }
 
 // src/heartbeat-runner.ts
-var RunnerConfig = z6.object({ protocol: z6.literal(1), serviceFile: z6.string(), hostDirectory: z6.string(), node: z6.string(), runner: z6.string(), intervalMs: z6.literal(60000), label: z6.string().regex(/^com\.opthreads\.heartbeat(?:\.[a-zA-Z0-9-]+)?$/), launchAgentsDirectory: z6.string() }).strict();
+var RunnerConfig = z7.object({ protocol: z7.literal(1), serviceFile: z7.string(), hostDirectory: z7.string(), node: z7.string(), runner: z7.string(), intervalMs: z7.literal(60000), label: z7.string().regex(/^com\.opthreads\.heartbeat(?:\.[a-zA-Z0-9-]+)?$/), launchAgentsDirectory: z7.string() }).strict();
 function absolute(path) {
   if (!isAbsolute(path))
     throw new Error("Heartbeat paths must be absolute");

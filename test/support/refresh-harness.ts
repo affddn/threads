@@ -8,7 +8,7 @@ export const settle = () => new Promise<void>((resolve) => setImmediate(resolve)
 export const streams = ["session.text.delta", "session.reasoning.delta", "session.tool.input.delta", "session.compaction.delta", "session.step.streamed", "session.tool.progress"];
 
 // Host boundaries only: production plugin setup/listeners, UI refresh and journal parsing run unchanged.
-export async function refreshHarness(savedRuns = 0) {
+export async function refreshHarness(savedRuns = 0, options: { mode?: "lite" | "full" } = {}, entry = plugin) {
   let owner = "A";
   let panel: { name: string; sessionID: string } | undefined;
   const records = new Map<string, Parameters<ServerPlugin.Context["storage"]["set"]>[1]>();
@@ -42,12 +42,15 @@ export async function refreshHarness(savedRuns = 0) {
   const listeners = new Set<(event: { details: { type: string; data: { sessionID: string } } }) => void>();
   const commands = new Map<string, () => unknown>();
   const slots: (() => unknown)[] = [];
+  const rpcIDs: string[] = [];
+  const slotIDs: string[] = [];
   const errors: unknown[] = [];
   let workerFailure: unknown;
   let holdWorkers: (() => unknown) | undefined;
   const ctx = {
+    options,
     client: {
-      rpc: (definition: { id: string }) => definition.id === "workflows" ? {
+      rpc: (definition: { id: string }) => { rpcIDs.push(definition.id); return definition.id === "workflows" ? {
         snapshot: async ({ ownerID }: { ownerID: string }) => {
           counts.workflowSnapshots++;
           return { runs: (await store.list(ownerID)).map(workflowSummary) };
@@ -69,7 +72,7 @@ export async function refreshHarness(savedRuns = 0) {
           return { workers: [] };
         },
         restore: async () => ({ workers: [] }),
-      },
+      }; },
       session: { list: async () => ({ data: [] }), get: async () => undefined },
     },
     storage: { store: (_key: string, { initial }: { initial: unknown }) => [initial, async () => {}] },
@@ -82,7 +85,7 @@ export async function refreshHarness(savedRuns = 0) {
       router: { current: () => ({ type: "session", sessionID: owner }) },
       panel: { current: () => panel, open: (name: string) => { panel = { name, sessionID: owner }; } },
       tabs: { enabled: () => true, list: () => [] },
-      slot: ({ append, render }: { append: string; render: () => unknown }) => { if (append === "app") slots.push(render); return () => {}; },
+      slot: ({ append, render }: { append: string; render: () => unknown }) => { slotIDs.push(append); if (append === "app") slots.push(render); return () => {}; },
       dialog: { select: async () => savedRuns ? `run-${owner === "A" ? 0 : 1}` : undefined, show: () => {}, set: () => {} },
       toast: { show: (error: unknown) => errors.push(error) },
     },
@@ -90,11 +93,11 @@ export async function refreshHarness(savedRuns = 0) {
       for (const command of build().commands) commands.set(command.id, command.run);
     } },
   };
-  const dispose = await plugin.setup(ctx as unknown as Plugin.Context);
+  const dispose = await entry.setup(ctx as unknown as Plugin.Context);
   for (const render of slots) render();
   await settle();
   return {
-    counts, errors, store, inspected,
+    counts, errors, store, inspected, rpcIDs, slotIDs, commandIDs: [...commands.keys()],
     event: (type: string) => { for (const listener of listeners) listener({ details: { type, data: { sessionID: owner } } }); },
     owner: (id: string) => { owner = id; },
     panel: (name?: string) => { panel = name ? { name, sessionID: owner } : undefined; },

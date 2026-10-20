@@ -21,8 +21,7 @@ import {
 } from "./external-access";
 import { permissionMatches, requireDelegation } from "./permissions";
 import { Report, WorkerView } from "./rpc";
-import { GrantedPaths } from "./workflow-types";
-import { assertWorkerProject } from "./workflow-worker";
+import { GrantedPaths } from "./granted-paths";
 
 const sessionID = z.string().transform((value) => Session.ID.make(value));
 const messageID = z
@@ -738,6 +737,7 @@ export function threads(
         const destinationPermissions = async (inherited: Permission.Ruleset) => {
           const worker = await workflowWorkerPermissions(inherited, agent, input.directory, workflow.access, request.paths);
           if (workflow.granted) {
+            const { assertWorkerProject } = await import("./workflow-worker");
             await assertWorkerProject(inherited, worker.role, request.paths, input.directory, workflow.isolation === "worktree");
           }
           return worker.permissions;

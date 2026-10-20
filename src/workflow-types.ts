@@ -1,5 +1,7 @@
 import { z } from "zod";
 import { Report } from "./rpc";
+import { GrantedPaths } from "./granted-paths";
+export { GrantedPaths, MAX_GRANTED_PATHS } from "./granted-paths";
 
 export const WORKFLOW_DIAGNOSTIC_JSON_BYTES = 4_096;
 export const WORKFLOW_SETTLEMENT_DIAGNOSTIC_JSON_BYTES = 512;
@@ -32,9 +34,6 @@ export const WorkflowStart = WorkflowLimits.extend({
   message: "Supply exactly one of script or saved workflow name",
 });
 export type WorkflowStart = z.infer<typeof WorkflowStart>;
-
-export const MAX_GRANTED_PATHS = 16;
-export const GrantedPaths = z.array(z.string().min(1).max(4096)).max(MAX_GRANTED_PATHS);
 
 export const WorkflowAgentInput = z.object({
   key: z.string().min(1).max(120),

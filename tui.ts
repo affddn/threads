@@ -4,7 +4,7 @@ import { createEffect, createSignal } from "solid-js";
 import { z } from "zod";
 import { ThreadsRpc } from "./src/rpc";
 import { activity } from "./src/activity";
-import { workflowUI } from "./src/workflow-ui";
+import { Mode } from "./src/mode";
 import { reportedTabAction } from "./src/activity-model";
 import { workInProgress } from "./src/idle";
 import { RGBA } from "@opentui/core";
@@ -15,15 +15,18 @@ const CoordinatorRef = z.object({ coordinatorID: z.string() });
 
 export default Plugin.define({
   id: "op-threads",
-  setup(ctx) {
-    const workflows = workflowUI(ctx, RGBA.fromHex("#808080"));
+  async setup(ctx) {
+    const mode = Mode.parse(ctx.options.mode);
+    const workflows = mode === "full"
+      ? (await import("./src/workflow-ui")).workflowUI(ctx, RGBA.fromHex("#808080"))
+      : undefined;
     const rpc = ctx.client.rpc(ThreadsRpc);
     const list = activity(
       ctx,
       RGBA,
       { createEffect, createSignal },
       getComponentCatalogue().spinner !== undefined,
-      { workflows: workflows.active, openWorkflows: workflows.open },
+      { workflows: workflows?.active ?? (() => 0), openWorkflows: workflows?.open ?? (() => {}) },
     );
     const closing = new Set<string>();
     const abort = new AbortController();
@@ -192,7 +195,7 @@ export default Plugin.define({
     });
     refresh();
     return () => {
-      workflows.dispose();
+      workflows?.dispose();
       stopped = true;
       abort.abort();
       list.dispose();

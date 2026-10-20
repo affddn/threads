@@ -36,6 +36,7 @@ Keep your other plugin entries in the list.
 
 | Option | Default | Range | What it controls |
 | --- | --- | --- | --- |
+| `mode` | `"full"` | `"lite"` or `"full"` | Lite registers only managed-worker features. See [lite worker mode](lite-worker-mode.md). |
 | `maxWorkers` | 4 | 1–32 | Unfinished workers per conversation. Workflow steps owned by that conversation count against the same limit. |
 | `workflowConcurrency` | 3 | 1–8 | Steps that one new workflow runs at the same time. |
 | `workflowMaxAgents` | Unset | 1–1,000 when supplied | Optional user-selected total-step budget for new workflows. |
@@ -55,7 +56,9 @@ With `workflowWorktreeCleanup` set to `false`, finished runs keep all their step
 }
 ```
 
-The terminal plugin takes no options. Server options don't reach it.
+The terminal plugin accepts `mode: "lite" | "full"`, defaulting to `"full"`. Server options don't reach it. To use lite mode, set `"options": { "mode": "lite" }` on **both** plugin entries. Invalid modes fail before plugin registration.
+
+Keep existing workflow locations in full mode. Lite is not a migration and does not resume workflows or heartbeat monitors. A mismatch leaves workflow UI without its server RPC, or a full server without workflow UI. See [lite worker mode](lite-worker-mode.md) for the feature boundary.
 
 ## Pin a version
 
