@@ -23,7 +23,7 @@ Startup never replays a first prompt. If creation was interrupted, the agent rep
 
 When `agent` is set, the plugin resolves the profile in the worker's `directory`, after OpenCode loads that folder's configuration. Just before the first prompt, it checks again that the caller may select that profile, and it selects the profile's model.
 
-If the profile isn't available, the task doesn't start. The worker stays in the index. Fix the profile configuration, then repeat the identical spawn request. Until the first prompt is admitted, the plugin rejects follow-ups and direct prompts to that worker.
+If the profile isn't available, the task doesn't start and the worker stays in the index. Stop BLOCKED/INCONCLUSIVE. The coordinator can choose an existing permitted profile, or omit `agent` for suitable inheritance, with a new key for the changed request. An authorized configuration fix permits an identical retry with the same key. Do not install profiles or broaden permissions automatically. Until the first prompt is admitted, the plugin rejects follow-ups and direct prompts to that worker; `threads_send` cannot bypass initialization.
 
 ## Worker permissions
 

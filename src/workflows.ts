@@ -153,7 +153,7 @@ export async function workflows(
   await ctx.skill.transform((editor) => editor.add({
     id: Skill.ID.make("workflow-authoring"),
     name: Skill.Name.make("Workflow authoring"),
-    description: "Author and run durable dynamic JavaScript workflows in OpenCode: parallel agents, structured handoffs, worktrees, recovery, and VERA verification.",
+    description: "Author and run durable dynamic JavaScript workflows in OpenCode: parallel agents, structured handoffs, worktrees, recovery, and independent verification.",
     path: Skill.Info.fields.path.make(skillPath),
     content: skill.replace(/^---\n[\s\S]*?\n---\n/, ""),
   }));

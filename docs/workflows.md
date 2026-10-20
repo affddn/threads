@@ -3,7 +3,7 @@
 Describe the work with `/workflow-run`. OpenCode loads the authoring contract, writes a JavaScript script, and starts the run in the background.
 
 ```text
-/workflow-run Audit src/auth and src/billing for missing authorization checks. Use VERA reviewers, confirm each finding independently, and return source references.
+/workflow-run Audit src/auth and src/billing for missing authorization checks. Use existing permitted profiles, confirm each finding independently, and return source references.
 ```
 
 The run has a stable ID. Your conversation stays available while its agents work. Each worker uses a native OpenCode session with its selected profile, model, and permissions.
@@ -108,11 +108,15 @@ An edited script starts a new run. A run's script and arguments remain fixed so 
 
 After editing a saved file directly, run `/workflow-refresh` to reload its command. The names `run` and `refresh` are reserved.
 
-## Use VERA roles
+## Select configured profiles
 
-Ask for VERA when the task needs its engineering and evidence rules. The workflow chooses configured role IDs such as `vera-engineer` and `vera-auditor-readonly`; `/setup-vera` remains the place to change their models.
+Every workflow `agent()` step requires an explicit existing configured agent ID. Unlike `threads_spawn`, omitting it does not inherit your conversation's profile. Confirm the ID, its capabilities, and permission to select it in the step's directory before starting. Your current profile can be selected explicitly when suitable and permitted. Threads requires no custom profile installation.
 
-Keep an implementation and its runtime verification on the same retained worktree. Give the auditor the changed paths and verification evidence. The root conversation inspects the artifacts and owns integration and the final verdict.
+Selected profiles supply their real prompts, model preferences, and permissions. A profile without a model uses the caller's resolved model. Naming a role in a prompt does not select a profile. Keep model choices in profiles; give the [authoring example](../skills/workflow-authoring/SKILL.md#example) a confirmed ID through `args.reviewerAgent`.
+
+Include the [workflow capability preflight](../skills/workflow-authoring/references/runtime.md#capability-preflight) in step briefs. Missing required access means BLOCKED/INCONCLUSIVE with unavailable coverage, not zero findings. If a profile is unavailable, do not invent an ID or widen permissions automatically. The coordinator can choose an existing permitted profile in a new workflow request with a new key.
+
+Keep an implementation and its runtime verification on the same retained worktree. Give the independent reviewer the changed paths and verification evidence. Workflow workers cannot delegate; managed workers outside workflows may use bounded native subagents within their permissions and task allowance. The root conversation inspects the artifacts and owns integration and the final verdict.
 
 ## Go further
 

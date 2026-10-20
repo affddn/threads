@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Make shipped worker and workflow guidance independent of custom agent profiles. Worker spawning can inherit the caller; workflow steps still require an explicit confirmed configured ID. Keep capability checks, permission restrictions, and historical verification evidence unchanged.
+
 - Add a reusable capability-preflight brief and coordinator acceptance policy for managed sessions. Missing required access is BLOCKED/INCONCLUSIVE, not zero findings.
 - Worker snapshots include optional server mode and directory metadata. The terminal warns once per distinct mismatch or unknown/fallback configuration without disabling workers or changing workflow state.
 - Add exact-tarball `verify:lite-recovery` and `verify:lite-diagnostics` suites using isolated native services and synthetic localhost providers.

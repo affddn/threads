@@ -1,5 +1,7 @@
 # Verification record
 
+Historical evidence: named profiles, model mappings, and personal setup describe the checks that actually ran, not installation requirements. See [current profile selection](workflows.md#select-configured-profiles) for portable guidance.
+
 This page records what the checks behind Threads releases showed. To run the checks yourself, see [Development](development.md#run-the-checks).
 
 The native suites use real isolated OpenCode services with deterministic local models. They prove execution behavior, not model quality. The separate [real-model check](#real-model-verification) uses the installed plugin and configured VERA profiles.

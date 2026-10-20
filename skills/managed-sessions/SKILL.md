@@ -1,6 +1,6 @@
 ---
 name: Managed sessions
-description: Spawn and monitor visible top-level OpenCode workers with op-threads. Use when VERA needs independent workstreams, separate conversations, or durable workers alongside native subagents.
+description: Spawn and monitor visible top-level OpenCode workers with op-threads. Use for independent workstreams, separate conversations, or durable workers alongside native subagents.
 ---
 
 # Managed sessions
@@ -16,8 +16,8 @@ Both the parent and managed workers may use native `subagent` when useful. Deleg
 
 1. Confirm the `threads_spawn` tool is available. If it is unavailable, use native `subagent` or report that the plugin needs activation. Do not substitute a hidden `opencode run` process.
 2. Assign an existing absolute directory and a stable task key.
-3. If the tool schema supports `agent`, select a configured profile explicitly. Use `agent: "vera-core"` for a VERA workstream that owns integration and may delegate. Use a specialist profile for a leaf task or read-only review. Omitting `agent` inherits the caller's active agent and model. Older plugin versions always inherit them.
-4. Call `threads_spawn` with `key`, `title`, `directory`, `task`, and the selected `agent`. Include the goal, scope, relevant context, constraints, delegation allowance, acceptance criteria, verification commands, expected report, and the required-capability table from [capability preflight](references/capability-preflight.md) in `task`.
+3. Select `agent` explicitly only when it is an existing configured profile known to suit the task and permitted in the assigned directory. Otherwise, omit `agent` to inherit the caller's active agent and resolved model when suitable. Threads requires no custom profiles. Naming a role does not prove its capabilities.
+4. Call `threads_spawn` with `key`, `title`, `directory`, `task`, and `agent` if selected. Include the goal, scope, relevant context, constraints, delegation allowance, acceptance criteria, verification commands, expected report, and the required-capability table from [capability preflight](references/capability-preflight.md) in `task`.
 5. Save the returned worker session ID and inspect its returned agent and model when present.
 
 An identical spawn key retries the original admission. Different work or a different agent requires a new key. A selected profile supplies its real system prompt, model preference, and permissions in the assigned directory. A profile without a model inherits the caller's resolved model. It has a separate conversation, so include all context it needs in the task brief. Mentioning a role in the brief does not select that profile.
@@ -26,7 +26,7 @@ Explicit role selection requires an `allow` for `subagent` on that role ID. Sele
 
 If the worker needs a directory outside its assigned one, such as a reference repository, pass it in `paths`. The worker can then use that directory without asking, within its own permissions. Explicit `external_directory` denies still win, and a different `paths` list requires a new key. Naming a path in the brief does not grant it.
 
-If the selected profile is unavailable, fix its configuration and retry the identical spawn request. The indexed worker stays uninitialized until that retry succeeds. Do not use `threads_send` to start it.
+If the selected profile is unavailable, stop BLOCKED with an INCONCLUSIVE verdict. The coordinator can choose a permitted existing profile, or omit `agent` when inheritance is suitable, using a new key for the changed request. Alternatively, after an authorized configuration fix, retry the identical request and key. Do not install profiles or broaden permissions automatically. The indexed worker stays uninitialized until an identical retry succeeds. Do not use `threads_send` to bypass initialization.
 
 ## Prove capability before substantive work
 

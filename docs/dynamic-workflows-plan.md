@@ -1,5 +1,7 @@
 # Dynamic workflows implementation
 
+Historical design record: the named profiles and personal setup below describe the original implementation environment, not installation requirements. Current [workflow guidance](workflows.md#select-configured-profiles) uses existing permitted profiles without requiring custom IDs.
+
 ## Completion criteria
 
 An OpenCode V2 session can submit a JavaScript workflow, continue its conversation while agents run, inspect phases and worker sessions, receive validated results, pause or stop, and resume recorded work after a service restart. Writing steps can use retained worktrees. Saved workflows can run again with different arguments. VERA profiles retain their configured models and permissions. A failed or inconclusive task cannot silently become a passing workflow.

@@ -35,7 +35,7 @@ With no saved workflow commands, the production registration harness reports:
 | Measure | Full (also default) | Lite |
 | --- | ---: | ---: |
 | Tools | 19 | 6 |
-| Tool description UTF-8 bytes | 4,721 | 1,564 |
+| Tool description UTF-8 bytes | 4,758 | 1,601 |
 | Tool input and output JSON schema bytes | 58,705 | 7,179 |
 | Session hooks | 4 | 2 |
 | Injected skills | 1 | 0 |

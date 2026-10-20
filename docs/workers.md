@@ -31,17 +31,19 @@ Each conversation can have 4 unfinished workers at a time. To change that limit,
 
 Without `agent`, the worker uses the same agent and model as your conversation.
 
-To use a different configured profile, set `agent`:
+To use a different existing configured profile, set `agent` to its confirmed ID. In this example, `confirmedAgentID` is that value, not a built-in agent name:
 
 ```text
-threads_spawn({ ..., agent: "vera-auditor-readonly" })
+threads_spawn({ ..., agent: confirmedAgentID })
 ```
 
-The worker then gets that profile's system prompt, model, and permissions. A profile without a model uses your conversation's model. Naming a role in the brief doesn't select it. Only `agent` does.
+The worker then gets that profile's system prompt, model preference, and permissions. A profile without a model uses your conversation's resolved model. Naming a role in the brief doesn't select it. Only `agent` does. Threads does not require custom profiles; omitting `agent` is appropriate when the inherited profile suits the task.
 
 To select a profile, your own permissions must allow `subagent` for that agent ID. If a rule denies or asks, Threads rejects the request before it creates the worker.
 
-A selected worker never gets more access than your conversation has. See [worker permissions](how-it-works.md#worker-permissions) for the exact rules.
+A named worker uses the selected profile's permissions, narrowed by the coordinator's session restrictions; the caller's agent permissions control whether that profile may be selected. See [worker permissions](how-it-works.md#worker-permissions) for the inherited deny/ask rules, the `external_directory` approval exception, and explicit path-deny precedence.
+
+If a selected profile is unavailable, stop BLOCKED/INCONCLUSIVE. The coordinator can choose an existing permitted profile, or suitable inheritance, with a new key for the changed request. An authorized configuration fix permits an identical retry with the same key. Do not broaden permissions automatically or use `threads_send` to bypass initialization.
 
 ## Give access to another folder
 

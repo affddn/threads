@@ -17,7 +17,7 @@ The body supports top-level `await`, ordinary data transformations, branching, a
 | Field | Meaning |
 | --- | --- |
 | `key` | Required unique, stable step name. Include the item and round when using loops. |
-| `agent` | Required configured OpenCode agent ID. |
+| `agent` | Required, explicit configured OpenCode agent ID. No omission or caller-profile fallback. |
 | `label` | Optional display title. |
 | `phase` | Optional phase override. |
 | `schema` | Optional JSON Schema for the result. Invalid schemas fail before dispatch. |
@@ -27,9 +27,23 @@ The body supports top-level `await`, ordinary data transformations, branching, a
 | `paths` | Optional list of up to 16 existing absolute directories outside the worker's directory that it may use without asking. Each path and its subdirectories are granted for `external_directory` only. |
 | `timeoutMs` | Optional user-requested step timeout, bounded by any supplied run deadline. |
 
+Role words in a prompt do not select a profile; `options.agent` does.
+
 Workers submit `workflows_result({ verdict, summary, evidence, result })`. Invalid results return a validation error so the worker can repair its output. A native execution that ends without a result has no task verdict.
 
 Profile restrictions and the coordinator's restrictions still apply. Read access blocks other plugin and MCP tools, including those with side effects, even if the selected profile permits them. Workflow workers cannot delegate. Selecting `access: "write"` does not grant permissions that the selected profile lacks.
+
+## Capability preflight
+
+Before dispatch, the coordinator confirms the required existing agent IDs, directories, capabilities, and permitted tool routes. Each worker proves its actual profile, assigned directory, and safe authorized access before substantive work. A role name or discovered tool is not access proof. Use available direct tools or CodeMode routes; check external paths separately. Path grants never override explicit denies.
+
+Include the required capabilities and non-secret read targets in the step prompt. The worker returns a brief receipt with its actual tool route, read result, and coverage limits. The coordinator checks that receipt before treating the result as review coverage. Missing required access means BLOCKED with an INCONCLUSIVE verdict and unavailable coverage, never zero findings. Do not request secrets, make production writes for preflight, or expand permissions automatically. This protocol does not require another agent. Workflow workers remain leaves.
+
+## Heartbeat monitoring
+
+For authorized unattended monitoring, enroll an existing recorded run with `workflows_heartbeat_enroll`. Use the registered tool schemas for inputs and `workflows_heartbeat_inspect` for monitor state and runner health. `workflows_heartbeat_update`, `workflows_heartbeat_rebind`, and `workflows_heartbeat_stop` manage the monitor within its retained policy. Do not create another runner or install one without authorization. Reminders never answer checkpoints or establish task success.
+
+The Threads package's `docs/heartbeat.md` contains full runner setup instructions; a standalone copy of this skill does not include that setup guide.
 
 ## External directories
 
